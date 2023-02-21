@@ -1,0 +1,16 @@
+[package]
+name = "txfs"
+version = "0.1.0"
+authors = ["code@tinychain.net"]
+edition = "2021"
+license = "Apache-2.0"
+description = "An in-memory filesystem cache layer over tokio::fs, with LFU eviction"
+repository = "https://github.com/haydnv/freqfs"
+readme = "README.md"
+
+categories = ["caching", "data-structures", "filesystem", "memory-management"]
+keywords = ["transactional", "file", "io", "cache"]
+
+[dependencies]
+freqfs = { path = "../freqfs" }
+txn_lock = { path = "../txn_lock" }
