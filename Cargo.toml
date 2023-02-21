@@ -4,13 +4,18 @@ version = "0.1.0"
 authors = ["code@tinychain.net"]
 edition = "2021"
 license = "Apache-2.0"
-description = "An in-memory filesystem cache layer over tokio::fs, with LFU eviction"
-repository = "https://github.com/haydnv/freqfs"
+description = "A cached transactional filesystem layer over tokio::fs"
+repository = "https://github.com/haydnv/txfs"
 readme = "README.md"
 
 categories = ["caching", "data-structures", "filesystem", "memory-management"]
 keywords = ["transactional", "file", "io", "cache"]
 
+[features]
+logging = ["log"]
+
 [dependencies]
 freqfs = { path = "../freqfs" }
+log = { version = "0.4", features = ["release_max_level_info"], optional = true }
+safecast = "0.1"
 txn_lock = { path = "../txn_lock" }
