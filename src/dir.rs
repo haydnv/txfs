@@ -5,20 +5,51 @@ use std::{fmt, io};
 use freqfs::{DirLock, FileLoad, Name};
 use futures::{join, TryFutureExt};
 use safecast::AsType;
-use txn_lock::map::{Entry, TxnMapLock};
-use txn_lock::scalar::TxnLock;
+use txn_lock::map::{Entry as TxnMapEntry, TxnMapLock};
 
 use super::file::*;
 use super::{Error, Result};
 
 const VERSIONS: &str = ".txfs";
 
+enum DirEntry<TxnId, FE> {
+    Dir(Dir<TxnId, FE>),
+    File(File<TxnId, FE>),
+}
+
+impl<TxnId, FE> Clone for DirEntry<TxnId, FE> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Dir(dir) => Self::Dir(dir.clone()),
+            Self::File(file) => Self::File(file.clone()),
+        }
+    }
+}
+
+impl<TxnId, FE> fmt::Debug for DirEntry<TxnId, FE> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::Dir(dir) => dir.fmt(f),
+            Self::File(file) => file.fmt(f),
+        }
+    }
+}
+
 /// A transactional directory
-#[derive(Clone)]
 pub struct Dir<TxnId, FE> {
-    commits: TxnMapLock<TxnId, String, TxnLock<TxnId, TxnId>>,
-    versions: DirLock<FE>,
     canon: DirLock<FE>,
+    versions: DirLock<FE>,
+    entries: TxnMapLock<TxnId, String, DirEntry<TxnId, FE>>,
+}
+
+impl<TxnId, FE> Clone for Dir<TxnId, FE> {
+    fn clone(&self) -> Self {
+        Self {
+            canon: self.canon.clone(),
+            versions: self.versions.clone(),
+            entries: self.entries.clone(),
+        }
+    }
 }
 
 impl<TxnId, FE> Dir<TxnId, FE>
@@ -40,24 +71,24 @@ where
         };
 
         Ok(Self {
-            commits: TxnMapLock::new(txn_id),
-            versions,
             canon,
+            versions,
+            entries: TxnMapLock::new(txn_id),
         })
     }
 
     /// Create a new [`Dir`] with the given `name` at `txn_id`.
     pub async fn create_dir(&self, txn_id: TxnId, name: String) -> Result<Self> {
-        // holding this write permit ensures that there is no other pending entry with this name
-        let _entry = match self.commits.entry(txn_id, name.clone()).await? {
-            Entry::Occupied(_) => {
+        // this write permit ensures that there is no other pending entry with this name
+        let entry = match self.entries.entry(txn_id, name.clone()).await? {
+            TxnMapEntry::Occupied(_) => {
                 return Err(io::Error::new(
                     io::ErrorKind::AlreadyExists,
                     format!("directory {name}"),
                 )
                 .into())
             }
-            Entry::Vacant(entry) => entry.insert(TxnLock::new(txn_id)),
+            TxnMapEntry::Vacant(entry) => entry,
         };
 
         let mut canon = self.canon.write().await;
@@ -68,7 +99,9 @@ where
         // but any abandoned (un-committed) writes must be discarded
         sub_dir.try_write().expect("sub-dir").truncate().await;
 
-        Self::load(txn_id, sub_dir)
+        let sub_dir = Self::load(txn_id, sub_dir)?;
+        entry.insert(DirEntry::Dir(sub_dir.clone()));
+        Ok(sub_dir)
     }
 
     /// Create a new [`File`] with the given `name`, `contents`, and `size` at `txn_id`.
@@ -82,16 +115,16 @@ where
     where
         FE: AsType<F>,
     {
-        // holding this write permit ensures that there is no other pending entry with this name
-        let _entry = match self.commits.entry(txn_id, name.clone()).await? {
-            Entry::Occupied(_) => {
+        // this write permit ensures that there is no other pending entry with this name
+        let entry = match self.entries.entry(txn_id, name.clone()).await? {
+            TxnMapEntry::Occupied(_) => {
                 return Err(io::Error::new(
                     io::ErrorKind::AlreadyExists,
                     format!("directory {name}"),
                 )
                 .into())
             }
-            Entry::Vacant(entry) => entry.insert(TxnLock::new(txn_id)),
+            TxnMapEntry::Vacant(entry) => entry,
         };
 
         let (mut canon, mut versions) = join!(self.canon.write(), self.versions.write());
@@ -110,12 +143,14 @@ where
             .truncate()
             .await;
 
-        Ok(File::load(file, file_versions))
+        let file = File::load(txn_id, file, file_versions);
+        entry.insert(DirEntry::File(file.clone()));
+        Ok(file)
     }
 
     /// Delete the entry at `name` at `txn_id` and return `true` if it was present.
     pub async fn delete<Q: Into<Arc<String>>>(&self, txn_id: TxnId, name: Q) -> Result<bool> {
-        self.commits
+        self.entries
             .remove(txn_id, name)
             .map_ok(|entry| entry.is_some())
             .map_err(Error::from)
@@ -181,5 +216,11 @@ where
         FE: AsType<F>,
     {
         todo!()
+    }
+}
+
+impl<TxnId, FE> fmt::Debug for Dir<TxnId, FE> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "transactional {:?}", self.canon)
     }
 }
