@@ -1,14 +1,15 @@
 use std::hash::Hash;
+use std::sync::Arc;
 use std::{fmt, io};
 
 use freqfs::{DirLock, FileLoad, Name};
-use futures::join;
+use futures::{join, TryFutureExt};
 use safecast::AsType;
 use txn_lock::map::{Entry, TxnMapLock};
 use txn_lock::scalar::TxnLock;
 
 use super::file::*;
-use super::Result;
+use super::{Error, Result};
 
 const VERSIONS: &str = ".txfs";
 
@@ -45,6 +46,7 @@ where
         })
     }
 
+    /// Create a new [`Dir`] with the given `name` at `txn_id`.
     pub async fn create_dir(&self, txn_id: TxnId, name: String) -> Result<Self> {
         // holding this write permit ensures that there is no other pending entry with this name
         let _entry = match self.commits.entry(txn_id, name.clone()).await? {
@@ -69,6 +71,7 @@ where
         Self::load(txn_id, sub_dir)
     }
 
+    /// Create a new [`File`] with the given `name`, `contents`, and `size` at `txn_id`.
     pub async fn create_file<F>(
         &self,
         txn_id: TxnId,
@@ -110,15 +113,20 @@ where
         Ok(File::load(file, file_versions))
     }
 
-    pub fn delete<Q: Name + ?Sized>(&self, _txn_id: TxnId, _name: &Q) -> Result<bool> {
+    /// Delete the entry at `name` at `txn_id` and return `true` if it was present.
+    pub async fn delete<Q: Into<Arc<String>>>(&self, txn_id: TxnId, name: Q) -> Result<bool> {
+        self.commits
+            .remove(txn_id, name)
+            .map_ok(|entry| entry.is_some())
+            .map_err(Error::from)
+            .await
+    }
+
+    pub async fn get_dir(&self, _txn_id: TxnId, _name: &Arc<String>) -> Result<Option<Self>> {
         todo!()
     }
 
-    pub fn get_dir<Q: Name + ?Sized>(&self, _txn_id: TxnId, _name: &Q) -> Result<Option<Self>> {
-        todo!()
-    }
-
-    pub fn get_file<Q>(&self, _txn_id: TxnId, _name: &Q) -> Result<Option<File<TxnId, FE>>>
+    pub async fn get_file<Q>(&self, _txn_id: TxnId, _name: &Q) -> Result<Option<File<TxnId, FE>>>
     where
         Q: Name + ?Sized,
     {
