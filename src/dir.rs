@@ -5,7 +5,7 @@ use std::{fmt, io};
 use freqfs::{DirLock, FileLoad, Name};
 use futures::{join, TryFutureExt};
 use safecast::AsType;
-use txn_lock::map::{Entry as TxnMapEntry, TxnMapLock};
+use txn_lock::map::{Entry as TxnMapEntry, TxnMapLock, TxnMapValueReadGuardMap};
 
 use super::file::*;
 use super::{Error, Result};
@@ -157,15 +157,46 @@ where
             .await
     }
 
-    pub async fn get_dir(&self, _txn_id: TxnId, _name: &Arc<String>) -> Result<Option<Self>> {
-        todo!()
+    pub async fn get_dir(
+        &self,
+        txn_id: TxnId,
+        name: &Arc<String>,
+    ) -> Result<Option<TxnMapValueReadGuardMap<String, Self>>> {
+        if let Some(entry) = self.entries.get(txn_id, name).map_err(Error::from).await? {
+            entry
+                .try_map(|entry| match entry {
+                    DirEntry::Dir(dir) => Ok(dir.clone()),
+                    DirEntry::File(file) => Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("not a directory: {:?}", file),
+                    )
+                    .into()),
+                })
+                .map(Some)
+        } else {
+            Ok(None)
+        }
     }
 
-    pub async fn get_file<Q>(&self, _txn_id: TxnId, _name: &Q) -> Result<Option<File<TxnId, FE>>>
-    where
-        Q: Name + ?Sized,
-    {
-        todo!()
+    pub async fn get_file(
+        &self,
+        txn_id: TxnId,
+        name: &Arc<String>,
+    ) -> Result<Option<TxnMapValueReadGuardMap<String, File<TxnId, FE>>>> {
+        if let Some(entry) = self.entries.get(txn_id, name).map_err(Error::from).await? {
+            entry
+                .try_map(|entry| match entry {
+                    DirEntry::File(file) => Ok(file.clone()),
+                    DirEntry::Dir(dir) => Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("not a file: {:?}", dir),
+                    )
+                    .into()),
+                })
+                .map(Some)
+        } else {
+            Ok(None)
+        }
     }
 
     pub async fn read_file<'a, Q, F>(
