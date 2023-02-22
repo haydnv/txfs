@@ -16,6 +16,7 @@ logging = ["log"]
 
 [dependencies]
 freqfs = { path = "../freqfs" }
+futures = "0.3"
 log = { version = "0.4", features = ["release_max_level_info"], optional = true }
 safecast = "0.1"
 txn_lock = { path = "../txn_lock" }

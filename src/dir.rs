@@ -1,14 +1,13 @@
-use std::fmt;
 use std::hash::Hash;
+use std::{fmt, io};
 
 use freqfs::{DirLock, FileLoad, Name};
+use futures::join;
 use safecast::AsType;
-use txn_lock::map::TxnMapLock;
+use txn_lock::map::{Entry, TxnMapLock};
 use txn_lock::scalar::TxnLock;
 
-use super::file::{
-    File, FileVersionRead, FileVersionReadOwned, FileVersionWrite, FileVersionWriteOwned,
-};
+use super::file::*;
 use super::Result;
 
 const VERSIONS: &str = ".txfs";
@@ -46,12 +45,69 @@ where
         })
     }
 
-    pub fn create_dir(&self, _txn_id: TxnId, _name: String) -> Result<Self> {
-        todo!()
+    pub async fn create_dir(&self, txn_id: TxnId, name: String) -> Result<Self> {
+        // holding this write permit ensures that there is no other pending entry with this name
+        let _entry = match self.commits.entry(txn_id, name.clone()).await? {
+            Entry::Occupied(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("directory {name}"),
+                )
+                .into())
+            }
+            Entry::Vacant(entry) => entry.insert(TxnLock::new(txn_id)),
+        };
+
+        let mut canon = self.canon.write().await;
+
+        // so it's safe to get or create this directory
+        let sub_dir = canon.get_or_create_dir(name)?;
+
+        // but any abandoned (un-committed) writes must be discarded
+        sub_dir.try_write().expect("sub-dir").truncate().await;
+
+        Self::load(txn_id, sub_dir)
     }
 
-    pub fn create_file(&self, _txn_id: TxnId, _name: String) -> Result<File<TxnId, FE>> {
-        todo!()
+    pub async fn create_file<F>(
+        &self,
+        txn_id: TxnId,
+        name: String,
+        contents: F,
+        size: usize,
+    ) -> Result<File<TxnId, FE>>
+    where
+        FE: AsType<F>,
+    {
+        // holding this write permit ensures that there is no other pending entry with this name
+        let _entry = match self.commits.entry(txn_id, name.clone()).await? {
+            Entry::Occupied(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("directory {name}"),
+                )
+                .into())
+            }
+            Entry::Vacant(entry) => entry.insert(TxnLock::new(txn_id)),
+        };
+
+        let (mut canon, mut versions) = join!(self.canon.write(), self.versions.write());
+
+        // but any prior version must be discarded
+        canon.delete(&name).await;
+
+        // so that it's safe to create a new file with its own versions
+        let file = canon.create_file(name.clone(), contents, size)?;
+        let file_versions = versions.get_or_create_dir(name)?;
+
+        // again, make sure to discard any un-committed versions
+        file_versions
+            .try_write()
+            .expect("file version dir")
+            .truncate()
+            .await;
+
+        Ok(File::load(file, file_versions))
     }
 
     pub fn delete<Q: Name + ?Sized>(&self, _txn_id: TxnId, _name: &Q) -> Result<bool> {
