@@ -150,7 +150,10 @@ impl<TxnId: Copy + Ord + Hash + fmt::Debug, FE: FileLoad> File<TxnId, FE> {
     }
 
     /// Lock this file to read at the given `txn_id`.
-    pub async fn write_owned<F>(&self, _txn_id: TxnId) -> Result<FileVersionReadOwned<TxnId, FE, F>>
+    pub async fn write_owned<F>(
+        &self,
+        _txn_id: TxnId,
+    ) -> Result<FileVersionWriteOwned<TxnId, FE, F>>
     where
         FE: AsType<F>,
     {
@@ -158,7 +161,7 @@ impl<TxnId: Copy + Ord + Hash + fmt::Debug, FE: FileLoad> File<TxnId, FE> {
     }
 
     /// Lock this file to read at the given `txn_id` without borrowing.
-    pub async fn into_write<F>(self, _txn_id: TxnId) -> Result<FileVersionReadOwned<TxnId, FE, F>>
+    pub async fn into_write<F>(self, _txn_id: TxnId) -> Result<FileVersionWriteOwned<TxnId, FE, F>>
     where
         FE: AsType<F>,
     {

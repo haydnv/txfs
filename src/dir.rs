@@ -186,12 +186,12 @@ where
         if let Some(entry) = self.entries.get(txn_id, name).map_err(Error::from).await? {
             entry
                 .try_map(|entry| match entry {
-                    DirEntry::File(file) => Ok(file.clone()),
                     DirEntry::Dir(dir) => Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         format!("not a file: {:?}", dir),
                     )
                     .into()),
+                    DirEntry::File(file) => Ok(file.clone()),
                 })
                 .map(Some)
         } else {
@@ -199,54 +199,35 @@ where
         }
     }
 
-    pub async fn read_file<'a, Q, F>(
-        &'a self,
-        _txn_id: TxnId,
-        _name: &Q,
-    ) -> Result<Option<FileVersionRead<'a, TxnId, F>>>
-    where
-        Q: Name + ?Sized,
-        F: 'a,
-        FE: AsType<F>,
-    {
-        todo!()
-    }
-
-    pub async fn read_file_owned<Q, F>(
+    pub async fn read_file<Q, F>(
         &self,
-        _txn_id: TxnId,
-        _name: &Q,
-    ) -> Result<Option<FileVersionReadOwned<TxnId, FE, F>>>
+        txn_id: TxnId,
+        name: &Arc<String>,
+    ) -> Result<FileVersionReadOwned<TxnId, FE, F>>
     where
-        Q: Name + ?Sized,
         FE: AsType<F>,
     {
-        todo!()
+        if let Some(file) = self.get_file(txn_id, name).await? {
+            file.read_owned(txn_id).await
+        } else {
+            Err(io::Error::new(io::ErrorKind::NotFound, format!("file not found: {name}")).into())
+        }
     }
 
-    pub async fn write_file<'a, Q, F>(
-        &'a self,
-        _txn_id: TxnId,
-        _name: &Q,
-    ) -> Result<Option<FileVersionWrite<'a, TxnId, F>>>
-    where
-        Q: Name + ?Sized,
-        F: 'a,
-        FE: AsType<F>,
-    {
-        todo!()
-    }
-
-    pub async fn write_file_owned<Q, F>(
+    pub async fn write_file<Q, F>(
         &self,
-        _txn_id: TxnId,
-        _name: &Q,
-    ) -> Result<Option<FileVersionWriteOwned<TxnId, FE, F>>>
+        txn_id: TxnId,
+        name: &Arc<String>,
+    ) -> Result<FileVersionWriteOwned<TxnId, FE, F>>
     where
         Q: Name + ?Sized,
         FE: AsType<F>,
     {
-        todo!()
+        if let Some(file) = self.get_file(txn_id, name).await? {
+            file.write_owned(txn_id).await
+        } else {
+            Err(io::Error::new(io::ErrorKind::NotFound, format!("file not found: {name}")).into())
+        }
     }
 }
 
