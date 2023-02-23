@@ -3,81 +3,44 @@ use std::hash::Hash;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 
-use freqfs::{
-    DirLock, FileLoad, FileLock, FileReadGuard, FileReadGuardOwned, FileWriteGuard,
-    FileWriteGuardOwned,
-};
+use freqfs::*;
+use get_size::GetSize;
 use safecast::AsType;
-use txn_lock::map::{TxnMapValueReadGuard, TxnMapValueWriteGuard};
-use txn_lock::scalar::TxnLock;
+use txn_lock::scalar::{TxnLock, TxnLockReadGuard, TxnLockWriteGuard};
 
 use super::Result;
 
 /// A read guard on a version of a transactional [`File`]
-pub struct FileVersionRead<'a, TxnId, F> {
-    _commit: TxnMapValueReadGuard<TxnId, TxnId>,
-    guard: FileReadGuard<'a, F>,
+pub struct FileVersionRead<TxnId, FE, F> {
+    _modified: TxnLockReadGuard<TxnId>,
+    version: FileReadGuardOwned<FE, F>,
 }
 
-impl<'a, TxnId, F> Deref for FileVersionRead<'a, TxnId, F> {
+impl<TxnId, FE, F> Deref for FileVersionRead<TxnId, FE, F> {
     type Target = F;
 
     fn deref(&self) -> &Self::Target {
-        self.guard.deref()
-    }
-}
-
-/// An owned read guard on a version of a transactional [`File`]
-pub struct FileVersionReadOwned<TxnId, FE, F> {
-    _commit: TxnMapValueReadGuard<TxnId, TxnId>,
-    guard: FileReadGuardOwned<FE, F>,
-}
-
-impl<TxnId, FE, F> Deref for FileVersionReadOwned<TxnId, FE, F> {
-    type Target = F;
-
-    fn deref(&self) -> &Self::Target {
-        self.guard.deref()
+        self.version.deref()
     }
 }
 
 /// A write guard on a version of a transactional [`File`]
-pub struct FileVersionWrite<'a, TxnId, F> {
-    _commit: TxnMapValueWriteGuard<TxnId, TxnId>,
-    guard: FileWriteGuard<'a, F>,
+pub struct FileVersionWrite<TxnId, FE, F> {
+    _modified: TxnLockWriteGuard<TxnId>,
+    version: FileWriteGuardOwned<FE, F>,
 }
 
-impl<'a, TxnId, F> Deref for FileVersionWrite<'a, TxnId, F> {
+impl<TxnId, FE, F> Deref for FileVersionWrite<TxnId, FE, F> {
     type Target = F;
 
     fn deref(&self) -> &Self::Target {
-        self.guard.deref()
+        self.version.deref()
     }
 }
 
-impl<'a, TxnId, F> DerefMut for FileVersionWrite<'a, TxnId, F> {
+impl<TxnId, FE, F> DerefMut for FileVersionWrite<TxnId, FE, F> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.guard.deref_mut()
-    }
-}
-
-/// An owned write guard on a version of a transactional [`File`]
-pub struct FileVersionWriteOwned<TxnId, FE, F> {
-    _commit: TxnMapValueWriteGuard<TxnId, TxnId>,
-    guard: FileWriteGuardOwned<FE, F>,
-}
-
-impl<TxnId, FE, F> Deref for FileVersionWriteOwned<TxnId, FE, F> {
-    type Target = F;
-
-    fn deref(&self) -> &Self::Target {
-        self.guard.deref()
-    }
-}
-
-impl<TxnId, FE, F> DerefMut for FileVersionWriteOwned<TxnId, FE, F> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.guard.deref_mut()
+        self.version.deref_mut()
     }
 }
 
@@ -100,7 +63,11 @@ impl<TxnId, FE> Clone for File<TxnId, FE> {
     }
 }
 
-impl<TxnId: Copy + Ord + Hash + fmt::Debug, FE: FileLoad> File<TxnId, FE> {
+impl<TxnId, FE> File<TxnId, FE>
+where
+    TxnId: Name + fmt::Display + fmt::Debug + Hash + Ord + Copy,
+    FE: FileLoad,
+{
     pub(super) fn load(txn_id: TxnId, canon: FileLock<FE>, versions: DirLock<FE>) -> Self {
         debug_assert_eq!(
             canon.path().parent(),
@@ -115,57 +82,68 @@ impl<TxnId: Copy + Ord + Hash + fmt::Debug, FE: FileLoad> File<TxnId, FE> {
         }
     }
 
-    /// Lock this file to read at the given `txn_id`.
-    pub async fn read<'a, F>(&'a self, _txn_id: TxnId) -> Result<FileVersionRead<'a, TxnId, F>>
+    /// Lock this file for reading at the given `txn_id`.
+    pub async fn read<F>(&self, txn_id: TxnId) -> Result<FileVersionRead<TxnId, FE, F>>
     where
-        F: 'a,
         FE: AsType<F>,
     {
-        todo!()
+        let last_modified = self.last_modified.read(txn_id).await?;
+        let version = if last_modified == txn_id {
+            let versions = self.versions.read().await;
+            versions.read_file_owned(&txn_id).await?
+        } else {
+            self.canon.read_owned().await?
+        };
+
+        Ok(FileVersionRead {
+            _modified: last_modified,
+            version,
+        })
     }
 
-    /// Lock this file to read at the given `txn_id`.
-    pub async fn read_owned<F>(&self, _txn_id: TxnId) -> Result<FileVersionReadOwned<TxnId, FE, F>>
+    /// Lock this file for reading at the given `txn_id` without borrowing.
+    pub async fn into_read<F>(self, txn_id: TxnId) -> Result<FileVersionRead<TxnId, FE, F>>
     where
         FE: AsType<F>,
     {
-        todo!()
+        self.read(txn_id).await
     }
 
-    /// Lock this file to read at the given `txn_id` without borrowing.
-    pub async fn into_read<F>(self, _txn_id: TxnId) -> Result<FileVersionReadOwned<TxnId, FE, F>>
+    /// Lock this file for writing at the given `txn_id`.
+    pub async fn write<F>(&self, txn_id: TxnId) -> Result<FileVersionWrite<TxnId, FE, F>>
     where
         FE: AsType<F>,
+        F: Clone + GetSize,
     {
-        todo!()
+        let mut last_modified = self.last_modified.write(txn_id).await?;
+
+        let version = if last_modified == txn_id {
+            let versions = self.versions.read().await;
+            versions.write_file_owned(&txn_id).await?
+        } else {
+            let canon = self.canon.read().await?;
+            let mut versions = self.versions.write().await;
+            let file =
+                versions.create_file(txn_id.to_string(), F::clone(&*canon), canon.get_size())?;
+
+            *last_modified = txn_id;
+
+            file.try_into_write()?
+        };
+
+        Ok(FileVersionWrite {
+            _modified: last_modified,
+            version,
+        })
     }
 
-    /// Lock this file to write at the given `txn_id`.
-    pub async fn write<'a, F>(&'a self, _txn_id: TxnId) -> Result<FileVersionRead<'a, TxnId, F>>
-    where
-        F: 'a,
-        FE: AsType<F>,
-    {
-        todo!()
-    }
-
-    /// Lock this file to read at the given `txn_id`.
-    pub async fn write_owned<F>(
-        &self,
-        _txn_id: TxnId,
-    ) -> Result<FileVersionWriteOwned<TxnId, FE, F>>
+    /// Lock this file for writing at the given `txn_id` without borrowing.
+    pub async fn into_write<F>(self, txn_id: TxnId) -> Result<FileVersionWrite<TxnId, FE, F>>
     where
         FE: AsType<F>,
+        F: Clone + GetSize,
     {
-        todo!()
-    }
-
-    /// Lock this file to read at the given `txn_id` without borrowing.
-    pub async fn into_write<F>(self, _txn_id: TxnId) -> Result<FileVersionWriteOwned<TxnId, FE, F>>
-    where
-        FE: AsType<F>,
-    {
-        todo!()
+        self.write(txn_id).await
     }
 }
 

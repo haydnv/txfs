@@ -1,8 +1,9 @@
 use std::hash::Hash;
 use std::{fmt, io};
 
-use freqfs::{DirLock, FileLoad};
+use freqfs::{DirLock, FileLoad, Name};
 use futures::{join, TryFutureExt};
+use get_size::GetSize;
 use safecast::AsType;
 use txn_lock::map::{
     Entry as TxnMapEntry, TxnMapLock, TxnMapValueReadGuard, TxnMapValueReadGuardMap,
@@ -105,50 +106,6 @@ where
         Ok(sub_dir)
     }
 
-    /// Create a new [`File`] with the given `name`, `contents`, and `size` at `txn_id`.
-    pub async fn create_file<F>(
-        &self,
-        txn_id: TxnId,
-        name: String,
-        contents: F,
-        size: usize,
-    ) -> Result<File<TxnId, FE>>
-    where
-        FE: AsType<F>,
-    {
-        // this write permit ensures that there is no other pending entry with this name
-        let entry = match self.entries.entry(txn_id, name.clone()).await? {
-            TxnMapEntry::Occupied(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    format!("directory {name}"),
-                )
-                .into())
-            }
-            TxnMapEntry::Vacant(entry) => entry,
-        };
-
-        let (mut canon, mut versions) = join!(self.canon.write(), self.versions.write());
-
-        // but any prior version must be discarded
-        canon.delete(&name).await;
-
-        // so that it's safe to create a new file with its own versions
-        let file = canon.create_file(name.clone(), contents, size)?;
-        let file_versions = versions.get_or_create_dir(name)?;
-
-        // again, make sure to discard any un-committed versions
-        file_versions
-            .try_write()
-            .expect("file version dir")
-            .truncate()
-            .await;
-
-        let file = File::load(txn_id, file, file_versions);
-        entry.insert(DirEntry::File(file.clone()));
-        Ok(file)
-    }
-
     /// Delete the entry at `name` at `txn_id` and return `true` if it was present.
     pub async fn delete(&self, txn_id: TxnId, name: &str) -> Result<bool> {
         self.entries
@@ -183,6 +140,57 @@ where
             Ok(None)
         }
     }
+}
+
+impl<TxnId, FE> Dir<TxnId, FE>
+where
+    TxnId: Name + fmt::Display + fmt::Debug + Hash + Ord + Copy,
+    FE: FileLoad + GetSize,
+{
+    /// Create a new [`File`] with the given `name`, `contents` at `txn_id`.
+    pub async fn create_file<F>(
+        &self,
+        txn_id: TxnId,
+        name: String,
+        contents: F,
+    ) -> Result<File<TxnId, FE>>
+    where
+        FE: AsType<F>,
+        F: Clone + GetSize,
+    {
+        // this write permit ensures that there is no other pending entry with this name
+        let entry = match self.entries.entry(txn_id, name.clone()).await? {
+            TxnMapEntry::Occupied(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("directory {name}"),
+                )
+                .into())
+            }
+            TxnMapEntry::Vacant(entry) => entry,
+        };
+
+        let (mut canon, mut versions) = join!(self.canon.write(), self.versions.write());
+
+        // but any prior version must be discarded
+        canon.delete(&name).await;
+
+        // so that it's safe to create a new file with its own versions
+        let size = contents.get_size();
+        let file = canon.create_file(name.clone(), contents, size)?;
+        let file_versions = versions.get_or_create_dir(name)?;
+
+        // again, make sure to discard any un-committed versions
+        file_versions
+            .try_write()
+            .expect("file version dir")
+            .truncate()
+            .await;
+
+        let file = File::load(txn_id, file, file_versions);
+        entry.insert(DirEntry::File(file.clone()));
+        Ok(file)
+    }
 
     /// Get a [`File`] present in this [`Dir`] at the given `txn_id`.
     pub async fn get_file(
@@ -216,12 +224,12 @@ where
         &self,
         txn_id: TxnId,
         name: &str,
-    ) -> Result<FileVersionReadOwned<TxnId, FE, F>>
+    ) -> Result<FileVersionRead<TxnId, FE, F>>
     where
         FE: AsType<F>,
     {
         if let Some(file) = self.get_file(txn_id, name).await? {
-            file.read_owned(txn_id).await
+            file.read(txn_id).await
         } else {
             Err(io::Error::new(io::ErrorKind::NotFound, format!("file not found: {name}")).into())
         }
@@ -233,12 +241,13 @@ where
         &self,
         txn_id: TxnId,
         name: &str,
-    ) -> Result<FileVersionWriteOwned<TxnId, FE, F>>
+    ) -> Result<FileVersionWrite<TxnId, FE, F>>
     where
         FE: AsType<F>,
+        F: Clone + GetSize,
     {
         if let Some(file) = self.get_file(txn_id, name).await? {
-            file.write_owned(txn_id).await
+            file.write(txn_id).await
         } else {
             Err(io::Error::new(io::ErrorKind::NotFound, format!("file not found: {name}")).into())
         }
