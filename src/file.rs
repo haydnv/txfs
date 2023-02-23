@@ -8,7 +8,7 @@ use get_size::GetSize;
 use safecast::AsType;
 use txn_lock::scalar::{TxnLock, TxnLockReadGuard, TxnLockWriteGuard};
 
-use super::Result;
+use super::{Error, Result};
 
 /// A read guard on a version of a transactional [`File`]
 pub struct FileVersionRead<TxnId, FE, F> {
@@ -91,8 +91,10 @@ where
         let version = if last_modified == txn_id {
             let versions = self.versions.read().await;
             versions.read_file_owned(&txn_id).await?
-        } else {
+        } else if txn_id > *last_modified {
             self.canon.read_owned().await?
+        } else {
+            return Err(Error::from(txn_lock::Error::Outdated));
         };
 
         Ok(FileVersionRead {
@@ -120,7 +122,7 @@ where
         let version = if last_modified == txn_id {
             let versions = self.versions.read().await;
             versions.write_file_owned(&txn_id).await?
-        } else {
+        } else if txn_id > *last_modified {
             let canon = self.canon.read().await?;
             let mut versions = self.versions.write().await;
             let file =
@@ -129,6 +131,8 @@ where
             *last_modified = txn_id;
 
             file.try_into_write()?
+        } else {
+            return Err(Error::from(txn_lock::Error::Outdated));
         };
 
         Ok(FileVersionWrite {
@@ -144,6 +148,55 @@ where
         F: Clone + GetSize,
     {
         self.write(txn_id).await
+    }
+}
+
+impl<TxnId, FE> File<TxnId, FE>
+where
+    TxnId: Name + Hash + Ord + PartialOrd<str> + fmt::Debug + Copy + Send + Sync,
+    FE: FileLoad,
+    FE: Clone,
+{
+    /// Commit the state of this file at `txn_id`.
+    /// This will un-block any pending future write locks.
+    /// If this file was modified at `txn_id`, it will replace the canonical version with
+    /// the modified version and sync with the host filesystem.
+    pub async fn commit(&self, txn_id: TxnId) {
+        let versions = self.versions.read().await;
+
+        if let Some(version) = versions.get(&txn_id) {
+            let version = match &*version {
+                DirEntry::File(file) => file.read().await.expect("version"),
+                DirEntry::Dir(dir) => panic!("not a file: {:?}", dir),
+            };
+
+            *self.canon.write().await.expect("canon") = FE::clone(&*version);
+            self.canon.sync().await.expect("sync");
+        }
+
+        self.last_modified.commit(txn_id);
+    }
+
+    pub async fn rollback(&self, txn_id: &TxnId) {
+        let mut versions = self.versions.write().await;
+        versions.delete(txn_id).await;
+        self.last_modified.rollback(txn_id);
+    }
+
+    pub async fn finalize(&self, txn_id: TxnId) {
+        let mut versions = self.versions.write().await;
+
+        let to_delete = versions
+            .names()
+            .filter(|version_id| txn_id >= *version_id.as_str())
+            .cloned()
+            .collect::<Vec<_>>();
+
+        for version_id in to_delete {
+            versions.delete(&version_id).await;
+        }
+
+        self.last_modified.finalize(txn_id)
     }
 }
 

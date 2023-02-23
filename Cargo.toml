@@ -19,5 +19,5 @@ freqfs = { path = "../freqfs" }
 futures = "0.3"
 get-size = "0.1"
 log = { version = "0.4", features = ["release_max_level_info"], optional = true }
-safecast = "0.1"
+safecast = { path = "../safecast" }
 txn_lock = { path = "../txn_lock" }
