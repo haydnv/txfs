@@ -4,7 +4,9 @@ use std::{fmt, io};
 use freqfs::{DirLock, FileLoad};
 use futures::{join, TryFutureExt};
 use safecast::AsType;
-use txn_lock::map::{Entry as TxnMapEntry, TxnMapLock, TxnMapValueReadGuardMap};
+use txn_lock::map::{
+    Entry as TxnMapEntry, TxnMapLock, TxnMapValueReadGuard, TxnMapValueReadGuardMap,
+};
 
 use super::file::*;
 use super::{Error, Result};
@@ -156,48 +158,60 @@ where
             .await
     }
 
+    /// Get a sub-directory in this [`Dir`] at the given `txn_id`.
     pub async fn get_dir(
         &self,
         txn_id: TxnId,
         name: &str,
     ) -> Result<Option<TxnMapValueReadGuardMap<String, Self>>> {
         if let Some(entry) = self.entries.get(txn_id, name).map_err(Error::from).await? {
-            entry
-                .try_map(|entry| match entry {
-                    DirEntry::Dir(dir) => Ok(dir.clone()),
-                    DirEntry::File(file) => Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("not a directory: {:?}", file),
-                    )
-                    .into()),
-                })
-                .map(Some)
+            expect_dir(entry).map(Some)
         } else {
             Ok(None)
         }
     }
 
+    /// Get a sub-directory in this [`Dir`] at the given `txn_id` synchronously, if possible.
+    pub fn try_get_dir(
+        &self,
+        txn_id: TxnId,
+        name: &str,
+    ) -> Result<Option<TxnMapValueReadGuardMap<String, Self>>> {
+        if let Some(entry) = self.entries.try_get(txn_id, name).map_err(Error::from)? {
+            expect_dir(entry).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Get a [`File`] present in this [`Dir`] at the given `txn_id`.
     pub async fn get_file(
         &self,
         txn_id: TxnId,
         name: &str,
     ) -> Result<Option<TxnMapValueReadGuardMap<String, File<TxnId, FE>>>> {
         if let Some(entry) = self.entries.get(txn_id, name).map_err(Error::from).await? {
-            entry
-                .try_map(|entry| match entry {
-                    DirEntry::Dir(dir) => Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("not a file: {:?}", dir),
-                    )
-                    .into()),
-                    DirEntry::File(file) => Ok(file.clone()),
-                })
-                .map(Some)
+            expect_file(entry).map(Some)
         } else {
             Ok(None)
         }
     }
 
+    /// Get a [`File`] present in this [`Dir`] at the given `txn_id` synchronously, if possible.
+    pub fn try_get_file(
+        &self,
+        txn_id: TxnId,
+        name: &str,
+    ) -> Result<Option<TxnMapValueReadGuardMap<String, File<TxnId, FE>>>> {
+        if let Some(entry) = self.entries.try_get(txn_id, name).map_err(Error::from)? {
+            expect_file(entry).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Convenience method to lock a file in this [`Dir`] for reading at the given `txn_id`.
+    /// This returns an owned read guard or an error if the file is not found.
     pub async fn read_file<F>(
         &self,
         txn_id: TxnId,
@@ -213,6 +227,8 @@ where
         }
     }
 
+    /// Convenience method to lock a file in this [`Dir`] for writing at the given `txn_id`.
+    /// This returns an owned write guard or an error if the file is not found.
     pub async fn write_file<F>(
         &self,
         txn_id: TxnId,
@@ -233,4 +249,30 @@ impl<TxnId, FE> fmt::Debug for Dir<TxnId, FE> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "transactional {:?}", self.canon)
     }
+}
+
+#[inline]
+fn expect_dir<TxnId, FE>(
+    entry: TxnMapValueReadGuard<String, DirEntry<TxnId, FE>>,
+) -> Result<TxnMapValueReadGuardMap<String, Dir<TxnId, FE>>> {
+    entry.try_map(|entry| match entry {
+        DirEntry::Dir(dir) => Ok(dir.clone()),
+        DirEntry::File(file) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("not a directory: {:?}", file),
+        )
+        .into()),
+    })
+}
+
+#[inline]
+fn expect_file<TxnId, FE>(
+    entry: TxnMapValueReadGuard<String, DirEntry<TxnId, FE>>,
+) -> Result<TxnMapValueReadGuardMap<String, File<TxnId, FE>>> {
+    entry.try_map(|entry| match entry {
+        DirEntry::Dir(dir) => {
+            Err(io::Error::new(io::ErrorKind::InvalidData, format!("not a file: {:?}", dir)).into())
+        }
+        DirEntry::File(file) => Ok(file.clone()),
+    })
 }
