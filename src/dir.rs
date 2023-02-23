@@ -1,8 +1,7 @@
 use std::hash::Hash;
-use std::sync::Arc;
 use std::{fmt, io};
 
-use freqfs::{DirLock, FileLoad, Name};
+use freqfs::{DirLock, FileLoad};
 use futures::{join, TryFutureExt};
 use safecast::AsType;
 use txn_lock::map::{Entry as TxnMapEntry, TxnMapLock, TxnMapValueReadGuardMap};
@@ -149,7 +148,7 @@ where
     }
 
     /// Delete the entry at `name` at `txn_id` and return `true` if it was present.
-    pub async fn delete<Q: Into<Arc<String>>>(&self, txn_id: TxnId, name: Q) -> Result<bool> {
+    pub async fn delete(&self, txn_id: TxnId, name: &str) -> Result<bool> {
         self.entries
             .remove(txn_id, name)
             .map_ok(|entry| entry.is_some())
@@ -160,7 +159,7 @@ where
     pub async fn get_dir(
         &self,
         txn_id: TxnId,
-        name: &Arc<String>,
+        name: &str,
     ) -> Result<Option<TxnMapValueReadGuardMap<String, Self>>> {
         if let Some(entry) = self.entries.get(txn_id, name).map_err(Error::from).await? {
             entry
@@ -181,7 +180,7 @@ where
     pub async fn get_file(
         &self,
         txn_id: TxnId,
-        name: &Arc<String>,
+        name: &str,
     ) -> Result<Option<TxnMapValueReadGuardMap<String, File<TxnId, FE>>>> {
         if let Some(entry) = self.entries.get(txn_id, name).map_err(Error::from).await? {
             entry
@@ -199,10 +198,10 @@ where
         }
     }
 
-    pub async fn read_file<Q, F>(
+    pub async fn read_file<F>(
         &self,
         txn_id: TxnId,
-        name: &Arc<String>,
+        name: &str,
     ) -> Result<FileVersionReadOwned<TxnId, FE, F>>
     where
         FE: AsType<F>,
@@ -214,13 +213,12 @@ where
         }
     }
 
-    pub async fn write_file<Q, F>(
+    pub async fn write_file<F>(
         &self,
         txn_id: TxnId,
-        name: &Arc<String>,
+        name: &str,
     ) -> Result<FileVersionWriteOwned<TxnId, FE, F>>
     where
-        Q: Name + ?Sized,
         FE: AsType<F>,
     {
         if let Some(file) = self.get_file(txn_id, name).await? {
