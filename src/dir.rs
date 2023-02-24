@@ -1,8 +1,11 @@
 use std::hash::Hash;
+use std::pin::Pin;
 use std::{fmt, io};
 
 use freqfs::{DirLock, FileLoad, Name};
-use futures::{join, TryFutureExt};
+use futures::future::{self, Future, TryFutureExt};
+use futures::join;
+use futures::stream::{FuturesUnordered, StreamExt};
 use get_size::GetSize;
 use safecast::AsType;
 use txn_lock::map::{
@@ -251,6 +254,57 @@ where
         } else {
             Err(io::Error::new(io::ErrorKind::NotFound, format!("file not found: {name}")).into())
         }
+    }
+}
+
+impl<TxnId, FE> Dir<TxnId, FE>
+where
+    TxnId: Name + PartialOrd<str> + Hash + Copy + Ord + fmt::Debug + Send + Sync,
+    FE: FileLoad + Clone,
+{
+    /// Commit the state of this [`Dir`] at `txn_id`.
+    pub fn commit<'a>(&'a self, txn_id: TxnId) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
+        Box::pin(async move {
+            let contents = self.entries.read_and_commit(txn_id).await;
+            let commits = FuturesUnordered::new();
+
+            for (_name, entry) in &*contents {
+                let entry = DirEntry::clone(&*entry);
+                commits.push(async move {
+                    match entry {
+                        DirEntry::Dir(dir) => dir.commit(txn_id).await,
+                        DirEntry::File(file) => file.commit(txn_id).await,
+                    }
+                });
+            }
+
+            commits.fold((), |(), ()| future::ready(())).await;
+        })
+    }
+
+    /// Roll back the state of this [`Dir`] at `txn_id`.
+    pub fn rollback<'a>(&'a self, txn_id: TxnId) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
+        Box::pin(async move {
+            let contents = self.entries.read_and_rollback(txn_id).await;
+            let rollbacks = FuturesUnordered::new();
+
+            for (_name, entry) in &*contents {
+                let entry = DirEntry::clone(&*entry);
+                rollbacks.push(async move {
+                    match entry {
+                        DirEntry::Dir(dir) => dir.rollback(txn_id).await,
+                        DirEntry::File(file) => file.rollback(&txn_id).await,
+                    }
+                });
+            }
+
+            rollbacks.fold((), |(), ()| future::ready(())).await;
+        })
+    }
+
+    /// Finalize the state of this [`Dir`] at `txn_id`.
+    pub fn finalize(&self, _txn_id: TxnId) {
+        todo!()
     }
 }
 
