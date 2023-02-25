@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::hash::Hash;
 use std::pin::Pin;
 use std::{fmt, io};
@@ -59,32 +60,54 @@ impl<TxnId, FE> Clone for Dir<TxnId, FE> {
 
 impl<TxnId, FE> Dir<TxnId, FE>
 where
-    TxnId: fmt::Debug + Hash + Ord + Copy,
-    FE: FileLoad,
+    TxnId: Name + Hash + Ord + Copy + fmt::Display + fmt::Debug + 'static,
+    FE: FileLoad + GetSize + Clone,
 {
     /// Load a transactional [`Dir`] from a [`freqfs::DirLock`].
-    pub fn load(txn_id: TxnId, canon: DirLock<FE>) -> Result<Self> {
-        let versions = {
-            let mut canon = canon.try_write()?;
-            if let Some(versions) = canon.get_dir(VERSIONS) {
-                #[cfg(feature = "logging")]
-                log::warn!("{:?} has dangling versions", canon);
-                versions.clone()
-            } else {
-                canon.create_dir(VERSIONS.to_string())?
-            }
-        };
+    pub fn load(txn_id: TxnId, canon: DirLock<FE>) -> Pin<Box<dyn Future<Output = Result<Self>>>> {
+        Box::pin(async move {
+            let (contents, versions) = {
+                let mut dir = canon.try_write()?;
 
-        Ok(Self {
-            canon,
-            versions,
-            entries: TxnMapLock::new(txn_id),
+                let versions = dir.get_or_create_dir(VERSIONS.to_string())?;
+
+                let contents = {
+                    let mut versions = versions.try_write()?;
+                    let mut contents = HashMap::new();
+
+                    for (name, entry) in dir.iter() {
+                        let entry = match entry.clone() {
+                            freqfs::DirEntry::Dir(dir) => {
+                                Self::load(txn_id, dir).map_ok(DirEntry::Dir).await?
+                            }
+                            freqfs::DirEntry::File(file) => {
+                                let file_versions = versions.get_or_create_dir(name.clone())?;
+
+                                File::load(txn_id, file, file_versions)
+                                    .map_ok(DirEntry::File)
+                                    .await?
+                            }
+                        };
+
+                        contents.insert(name.clone(), entry);
+                    }
+
+                    contents
+                };
+
+                (contents, versions)
+            };
+
+            Ok(Self {
+                canon,
+                versions,
+                entries: TxnMapLock::with_contents(txn_id, contents),
+            })
         })
     }
 
     /// Create a new [`Dir`] with the given `name` at `txn_id`.
     pub async fn create_dir(&self, txn_id: TxnId, name: String) -> Result<Self> {
-        // this write permit ensures that there is no other pending entry with this name
         let entry = match self.entries.entry(txn_id, name.clone()).await? {
             TxnMapEntry::Occupied(_) => {
                 return Err(io::Error::new(
@@ -98,14 +121,11 @@ where
 
         let mut canon = self.canon.write().await;
 
-        // so it's safe to get or create this directory
-        let sub_dir = canon.get_or_create_dir(name)?;
+        let sub_dir = canon.get_or_create_dir(name.clone())?;
+        let sub_dir = Self::load(txn_id, sub_dir).await?;
 
-        // but any abandoned (un-committed) writes must be discarded
-        sub_dir.try_write().expect("sub-dir").truncate().await;
-
-        let sub_dir = Self::load(txn_id, sub_dir)?;
         entry.insert(DirEntry::Dir(sub_dir.clone()));
+
         Ok(sub_dir)
     }
 
@@ -148,7 +168,7 @@ where
 impl<TxnId, FE> Dir<TxnId, FE>
 where
     TxnId: Name + fmt::Display + fmt::Debug + Hash + Ord + Copy,
-    FE: FileLoad + GetSize,
+    FE: FileLoad + GetSize + Clone,
 {
     /// Create a new [`File`] with the given `name`, `contents` at `txn_id`.
     pub async fn create_file<F>(
@@ -190,7 +210,7 @@ where
             .truncate()
             .await;
 
-        let file = File::load(txn_id, file, file_versions);
+        let file = File::load(txn_id, file, file_versions).await?;
         entry.insert(DirEntry::File(file.clone()));
         Ok(file)
     }
@@ -265,40 +285,42 @@ where
     /// Commit the state of this [`Dir`] at `txn_id`.
     pub fn commit<'a>(&'a self, txn_id: TxnId) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
         Box::pin(async move {
-            let contents = self.entries.read_and_commit(txn_id).await;
-            let commits = FuturesUnordered::new();
+            if let Some(contents) = self.entries.read_and_commit(txn_id).await {
+                let commits = FuturesUnordered::new();
 
-            for (_name, entry) in &*contents {
-                let entry = DirEntry::clone(&*entry);
-                commits.push(async move {
-                    match entry {
-                        DirEntry::Dir(dir) => dir.commit(txn_id).await,
-                        DirEntry::File(file) => file.commit(txn_id).await,
-                    }
-                });
+                for (_name, entry) in &*contents {
+                    let entry = DirEntry::clone(&*entry);
+                    commits.push(async move {
+                        match entry {
+                            DirEntry::Dir(dir) => dir.commit(txn_id).await,
+                            DirEntry::File(file) => file.commit(txn_id).await,
+                        }
+                    });
+                }
+
+                commits.fold((), |(), ()| future::ready(())).await;
             }
-
-            commits.fold((), |(), ()| future::ready(())).await;
         })
     }
 
     /// Roll back the state of this [`Dir`] at `txn_id`.
     pub fn rollback<'a>(&'a self, txn_id: TxnId) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
         Box::pin(async move {
-            let contents = self.entries.read_and_rollback(txn_id).await;
-            let rollbacks = FuturesUnordered::new();
+            if let Some(contents) = self.entries.read_and_rollback(txn_id).await {
+                let rollbacks = FuturesUnordered::new();
 
-            for (_name, entry) in &*contents {
-                let entry = DirEntry::clone(&*entry);
-                rollbacks.push(async move {
-                    match entry {
-                        DirEntry::Dir(dir) => dir.rollback(txn_id).await,
-                        DirEntry::File(file) => file.rollback(&txn_id).await,
-                    }
-                });
+                for (_name, entry) in &*contents {
+                    let entry = DirEntry::clone(&*entry);
+                    rollbacks.push(async move {
+                        match entry {
+                            DirEntry::Dir(dir) => dir.rollback(txn_id).await,
+                            DirEntry::File(file) => file.rollback(&txn_id).await,
+                        }
+                    });
+                }
+
+                rollbacks.fold((), |(), ()| future::ready(())).await;
             }
-
-            rollbacks.fold((), |(), ()| future::ready(())).await;
         })
     }
 

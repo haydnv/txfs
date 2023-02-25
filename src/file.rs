@@ -8,7 +8,7 @@ use get_size::GetSize;
 use safecast::AsType;
 use txn_lock::scalar::{TxnLock, TxnLockReadGuard, TxnLockWriteGuard};
 
-use super::{Error, Result};
+use super::Result;
 
 /// A read guard on a version of a transactional [`File`]
 pub struct FileVersionRead<TxnId, FE, F> {
@@ -66,20 +66,40 @@ impl<TxnId, FE> Clone for File<TxnId, FE> {
 impl<TxnId, FE> File<TxnId, FE>
 where
     TxnId: Name + fmt::Display + fmt::Debug + Hash + Ord + Copy,
-    FE: FileLoad,
+    FE: FileLoad + GetSize + Clone,
 {
-    pub(super) fn load(txn_id: TxnId, canon: FileLock<FE>, versions: DirLock<FE>) -> Self {
+    pub(super) async fn load(
+        txn_id: TxnId,
+        canon: FileLock<FE>,
+        versions: DirLock<FE>,
+    ) -> Result<Self> {
         debug_assert_eq!(
             canon.path().parent(),
             versions.try_read().expect("versions").path().parent(),
         );
 
-        Self {
+        {
+            let txn_id = txn_id.to_string();
+            let contents = canon.read().await?;
+            let mut versions = versions.write().await;
+
+            if let Some(version) = versions.get_file(&txn_id) {
+                *version.write().await? = FE::clone(&*contents);
+            } else {
+                versions.create_file(
+                    txn_id.to_string(),
+                    FE::clone(&*contents),
+                    contents.get_size(),
+                )?;
+            }
+        }
+
+        Ok(Self {
             last_modified: TxnLock::new(txn_id),
             canon,
             versions,
             phantom: PhantomData,
-        }
+        })
     }
 
     /// Lock this file for reading at the given `txn_id`.
@@ -88,14 +108,8 @@ where
         FE: AsType<F>,
     {
         let last_modified = self.last_modified.read(txn_id).await?;
-        let version = if last_modified == txn_id {
-            let versions = self.versions.read().await;
-            versions.read_file_owned(&txn_id).await?
-        } else if txn_id > *last_modified {
-            self.canon.read_owned().await?
-        } else {
-            return Err(Error::from(txn_lock::Error::Outdated));
-        };
+        let versions = self.versions.read().await;
+        let version = versions.read_file_owned(&*last_modified).await?;
 
         Ok(FileVersionRead {
             _modified: last_modified,
@@ -118,26 +132,23 @@ where
         F: Clone + GetSize,
     {
         let mut last_modified = self.last_modified.write(txn_id).await?;
+        let mut versions = self.versions.write().await;
 
-        let version = if last_modified == txn_id {
-            let versions = self.versions.read().await;
-            versions.write_file_owned(&txn_id).await?
-        } else if txn_id > *last_modified {
-            let canon = self.canon.read().await?;
-            let mut versions = self.versions.write().await;
-            let file =
-                versions.create_file(txn_id.to_string(), F::clone(&*canon), canon.get_size())?;
-
+        let version = if last_modified < txn_id {
+            let canon = versions.read_file_owned(&*last_modified).await?;
             *last_modified = txn_id;
 
-            file.try_into_write()?
+            let version = F::clone(&*canon);
+            let size = version.get_size();
+
+            versions.create_file(txn_id.to_string(), version, size)?
         } else {
-            return Err(Error::from(txn_lock::Error::Outdated));
+            versions.get_file(&*last_modified).expect("version").clone()
         };
 
         Ok(FileVersionWrite {
             _modified: last_modified,
-            version,
+            version: version.write_owned().await?,
         })
     }
 
