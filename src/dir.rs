@@ -73,6 +73,8 @@ where
 
                 let contents = {
                     let mut versions = versions.try_write()?;
+                    versions.truncate();
+
                     let mut contents = HashMap::new();
 
                     for (name, entry) in dir.iter() {
@@ -81,7 +83,7 @@ where
                                 Self::load(txn_id, dir).map_ok(DirEntry::Dir).await?
                             }
                             freqfs::DirEntry::File(file) => {
-                                let file_versions = versions.get_or_create_dir(name.clone())?;
+                                let file_versions = versions.create_dir(name.clone())?;
 
                                 File::load(txn_id, file, file_versions)
                                     .map_ok(DirEntry::File)
@@ -130,12 +132,16 @@ where
     }
 
     /// Delete the entry at `name` at `txn_id` and return `true` if it was present.
-    pub async fn delete(&self, txn_id: TxnId, name: &str) -> Result<bool> {
-        self.entries
-            .remove(txn_id, name)
-            .map_ok(|entry| entry.is_some())
-            .map_err(Error::from)
-            .await
+    pub async fn delete(&self, txn_id: TxnId, name: String) -> Result<bool> {
+        if let Some(entry) = self.entries.remove(txn_id, name.as_str()).await? {
+            if let DirEntry::Dir(_dir) = &*entry {
+                todo!("truncate dir");
+            }
+
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     /// Get a sub-directory in this [`Dir`] at the given `txn_id`.
@@ -314,7 +320,7 @@ where
                     rollbacks.push(async move {
                         match entry {
                             DirEntry::Dir(dir) => dir.rollback(txn_id).await,
-                            DirEntry::File(file) => file.rollback(&txn_id).await,
+                            DirEntry::File(file) => file.rollback(txn_id).await,
                         }
                     });
                 }

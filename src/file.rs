@@ -81,17 +81,14 @@ where
         {
             let txn_id = txn_id.to_string();
             let contents = canon.read().await?;
-            let mut versions = versions.write().await;
+            let mut versions = versions.try_write()?;
+            versions.truncate();
 
-            if let Some(version) = versions.get_file(&txn_id) {
-                *version.write().await? = FE::clone(&*contents);
-            } else {
-                versions.create_file(
-                    txn_id.to_string(),
-                    FE::clone(&*contents),
-                    contents.get_size(),
-                )?;
-            }
+            versions.create_file(
+                txn_id.to_string(),
+                FE::clone(&*contents),
+                contents.get_size(),
+            )?;
         }
 
         Ok(Self {
@@ -101,7 +98,13 @@ where
             phantom: PhantomData,
         })
     }
+}
 
+impl<TxnId, FE> File<TxnId, FE>
+where
+    TxnId: Name + fmt::Display + fmt::Debug + Hash + Ord + Copy,
+    FE: FileLoad,
+{
     /// Lock this file for reading at the given `txn_id`.
     pub async fn read<F>(&self, txn_id: TxnId) -> Result<FileVersionRead<TxnId, FE, F>>
     where
@@ -142,8 +145,10 @@ where
             let size = version.get_size();
 
             versions.create_file(txn_id.to_string(), version, size)?
-        } else {
+        } else if last_modified == txn_id {
             versions.get_file(&*last_modified).expect("version").clone()
+        } else {
+            return Err(txn_lock::Error::Outdated.into());
         };
 
         Ok(FileVersionWrite {
@@ -173,41 +178,46 @@ where
     /// If this file was modified at `txn_id`, it will replace the canonical version with
     /// the modified version and sync with the host filesystem.
     pub async fn commit(&self, txn_id: TxnId) {
-        let versions = self.versions.read().await;
+        if let Some(last_modified) = self.last_modified.read_and_commit(txn_id).await {
+            if &**last_modified == &txn_id {
+                let versions = self.versions.read().await;
 
-        if let Some(version) = versions.get(&txn_id) {
-            let version = match &*version {
-                DirEntry::File(file) => file.read().await.expect("version"),
-                DirEntry::Dir(dir) => panic!("not a file: {:?}", dir),
-            };
+                if let Some(version) = versions.get(&txn_id) {
+                    let version = match &*version {
+                        DirEntry::File(file) => file.read().await.expect("version"),
+                        DirEntry::Dir(dir) => panic!("not a file: {:?}", dir),
+                    };
 
-            *self.canon.write().await.expect("canon") = FE::clone(&*version);
-            self.canon.sync().await.expect("sync");
+                    *self.canon.write().await.expect("canon") = FE::clone(&*version);
+                    self.canon.sync().await.expect("sync");
+                }
+            }
         }
-
-        self.last_modified.commit(txn_id);
     }
 
-    pub async fn rollback(&self, txn_id: &TxnId) {
-        let mut versions = self.versions.write().await;
-        versions.delete(txn_id).await;
-        self.last_modified.rollback(txn_id);
+    pub async fn rollback(&self, txn_id: TxnId) {
+        if let Some(last_modified) = self.last_modified.read_and_rollback(txn_id).await {
+            if &**last_modified == &txn_id {
+                let mut versions = self.versions.write().await;
+                versions.delete(&txn_id).await;
+            }
+        }
     }
 
     pub async fn finalize(&self, txn_id: TxnId) {
-        let mut versions = self.versions.write().await;
+        if let Some(last_modified) = self.last_modified.read_and_finalize(txn_id) {
+            let mut versions = self.versions.write().await;
 
-        let to_delete = versions
-            .names()
-            .filter(|version_id| txn_id >= *version_id.as_str())
-            .cloned()
-            .collect::<Vec<_>>();
+            let to_delete = versions
+                .names()
+                .filter(|version_id| *last_modified >= *version_id.as_str())
+                .cloned()
+                .collect::<Vec<_>>();
 
-        for version_id in to_delete {
-            versions.delete(&version_id).await;
+            for version_id in to_delete {
+                versions.delete(&version_id).await;
+            }
         }
-
-        self.last_modified.finalize(txn_id)
     }
 }
 
