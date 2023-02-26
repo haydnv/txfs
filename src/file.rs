@@ -178,29 +178,29 @@ where
     /// If this file was modified at `txn_id`, it will replace the canonical version with
     /// the modified version and sync with the host filesystem.
     pub async fn commit(&self, txn_id: TxnId) {
-        if let Some(last_modified) = self.last_modified.read_and_commit(txn_id).await {
-            if &**last_modified == &txn_id {
-                let versions = self.versions.read().await;
+        let last_modified = self.last_modified.read_and_commit(txn_id).await;
 
-                if let Some(version) = versions.get(&txn_id) {
-                    let version = match &*version {
-                        DirEntry::File(file) => file.read().await.expect("version"),
-                        DirEntry::Dir(dir) => panic!("not a file: {:?}", dir),
-                    };
+        if &**last_modified == &txn_id {
+            let versions = self.versions.read().await;
 
-                    *self.canon.write().await.expect("canon") = FE::clone(&*version);
-                    self.canon.sync().await.expect("sync");
-                }
+            if let Some(version) = versions.get(&txn_id) {
+                let version = match &*version {
+                    DirEntry::File(file) => file.read().await.expect("version"),
+                    DirEntry::Dir(dir) => panic!("not a file: {:?}", dir),
+                };
+
+                *self.canon.write().await.expect("canon") = FE::clone(&*version);
+                self.canon.sync().await.expect("sync");
             }
         }
     }
 
     pub async fn rollback(&self, txn_id: TxnId) {
-        if let Some(last_modified) = self.last_modified.read_and_rollback(txn_id).await {
-            if &**last_modified == &txn_id {
-                let mut versions = self.versions.write().await;
-                versions.delete(&txn_id).await;
-            }
+        let last_modified = self.last_modified.read_and_rollback(txn_id).await;
+
+        if &**last_modified == &txn_id {
+            let mut versions = self.versions.write().await;
+            versions.delete(&txn_id).await;
         }
     }
 

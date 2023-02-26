@@ -5,8 +5,8 @@ use std::{fmt, io};
 
 use freqfs::{DirLock, FileLoad, Name};
 use futures::future::{self, Future, TryFutureExt};
-use futures::join;
 use futures::stream::{FuturesUnordered, StreamExt};
+use futures::{join, try_join};
 use get_size::GetSize;
 use safecast::AsType;
 use txn_lock::map::{
@@ -28,6 +28,15 @@ impl<TxnId, FE> Clone for DirEntry<TxnId, FE> {
         match self {
             Self::Dir(dir) => Self::Dir(dir.clone()),
             Self::File(file) => Self::File(file.clone()),
+        }
+    }
+}
+
+impl<TxnId, FE> DirEntry<TxnId, FE> {
+    fn is_file(&self) -> bool {
+        match self {
+            Self::File(_) => true,
+            _ => false,
         }
     }
 }
@@ -291,20 +300,41 @@ where
     /// Commit the state of this [`Dir`] at `txn_id`.
     pub fn commit<'a>(&'a self, txn_id: TxnId) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
         Box::pin(async move {
-            if let Some(contents) = self.entries.read_and_commit(txn_id).await {
-                let commits = FuturesUnordered::new();
+            let (contents, deltas) = self.entries.read_and_commit(txn_id).await;
+            let commits = FuturesUnordered::new();
 
-                for (_name, entry) in &*contents {
-                    let entry = DirEntry::clone(&*entry);
-                    commits.push(async move {
-                        match entry {
-                            DirEntry::Dir(dir) => dir.commit(txn_id).await,
-                            DirEntry::File(file) => file.commit(txn_id).await,
+            for (_name, entry) in &*contents {
+                let entry = DirEntry::clone(&*entry);
+                commits.push(async move {
+                    match entry {
+                        DirEntry::Dir(dir) => dir.commit(txn_id).await,
+                        DirEntry::File(file) => file.commit(txn_id).await,
+                    }
+                });
+            }
+
+            let mut needs_sync = false;
+            if let Some(deltas) = deltas {
+                let mut canon = self.canon.write().await;
+
+                for (name, entry) in deltas {
+                    if entry.is_none() {
+                        assert!(!contents.contains_key(&**name));
+
+                        if let Some(entry) = canon.get(&**name) {
+                            if entry.is_file() {
+                                canon.delete(&**name).await;
+                                needs_sync = true;
+                            }
                         }
-                    });
+                    }
                 }
+            };
 
-                commits.fold((), |(), ()| future::ready(())).await;
+            commits.fold((), |(), ()| future::ready(())).await;
+
+            if needs_sync {
+                self.canon.sync().await.expect("sync");
             }
         })
     }
@@ -312,27 +342,46 @@ where
     /// Roll back the state of this [`Dir`] at `txn_id`.
     pub fn rollback<'a>(&'a self, txn_id: TxnId) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
         Box::pin(async move {
-            if let Some(contents) = self.entries.read_and_rollback(txn_id).await {
-                let rollbacks = FuturesUnordered::new();
+            let (contents, deltas) = self.entries.read_and_rollback(txn_id).await;
+            let rollbacks = FuturesUnordered::new();
 
-                for (_name, entry) in &*contents {
-                    let entry = DirEntry::clone(&*entry);
-                    rollbacks.push(async move {
-                        match entry {
-                            DirEntry::Dir(dir) => dir.rollback(txn_id).await,
-                            DirEntry::File(file) => file.rollback(txn_id).await,
+            for (_name, entry) in &*contents {
+                let entry = DirEntry::clone(&*entry);
+
+                rollbacks.push(async move {
+                    match entry {
+                        DirEntry::Dir(dir) => dir.rollback(txn_id).await,
+                        DirEntry::File(file) => file.rollback(txn_id).await,
+                    }
+                });
+            }
+
+            let mut needs_sync = false;
+            if let Some(deltas) = deltas {
+                let mut canon = self.canon.write().await;
+
+                for (name, entry) in deltas {
+                    if let Some(entry) = entry {
+                        assert!(contents.contains_key(&**name));
+
+                        if entry.is_file() {
+                            needs_sync = needs_sync || canon.delete(&**name).await;
                         }
-                    });
+                    }
                 }
+            }
 
-                rollbacks.fold((), |(), ()| future::ready(())).await;
+            rollbacks.fold((), |(), ()| future::ready(())).await;
+
+            if needs_sync {
+                self.canon.sync().await.expect("sync");
             }
         })
     }
 
     /// Finalize the state of this [`Dir`] at `txn_id`.
-    pub fn finalize(&self, _txn_id: TxnId) {
-        todo!()
+    pub async fn finalize(&self, txn_id: TxnId) {
+        self.entries.finalize(txn_id);
     }
 }
 
