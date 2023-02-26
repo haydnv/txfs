@@ -5,8 +5,8 @@ use std::{fmt, io};
 
 use freqfs::{DirLock, FileLoad, Name};
 use futures::future::{self, Future, TryFutureExt};
+use futures::join;
 use futures::stream::{FuturesUnordered, StreamExt};
-use futures::{join, try_join};
 use get_size::GetSize;
 use safecast::AsType;
 use txn_lock::map::{
@@ -64,6 +64,14 @@ impl<TxnId, FE> Clone for Dir<TxnId, FE> {
             versions: self.versions.clone(),
             entries: self.entries.clone(),
         }
+    }
+}
+
+impl<TxnId, FE> Dir<TxnId, FE> {
+    /// Destructure this [`Dir`] into its underlying [`DirLock`].
+    /// The caller of this method must implement transactional state management explicitly.
+    pub fn into_inner(self) -> DirLock<FE> {
+        self.canon
     }
 }
 

@@ -63,6 +63,14 @@ impl<TxnId, FE> Clone for File<TxnId, FE> {
     }
 }
 
+impl<TxnId, FE> File<TxnId, FE> {
+    /// Destructure this [`File`] into its underlying [`FileLock`].
+    /// The caller of this method must implement transactional state management explicitly.
+    pub fn into_inner(self) -> FileLock<FE> {
+        self.canon
+    }
+}
+
 impl<TxnId, FE> File<TxnId, FE>
 where
     TxnId: Name + fmt::Display + fmt::Debug + Hash + Ord + Copy,
