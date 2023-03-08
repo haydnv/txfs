@@ -77,6 +77,18 @@ impl<TxnId, FE> Dir<TxnId, FE> {
     }
 }
 
+impl<TxnId: Copy + Hash + Eq + Ord + fmt::Debug, FE> Dir<TxnId, FE> {
+    /// Return the number of entries in this [`Dir`] as of the given `txn_id`.
+    pub async fn len(&self, txn_id: TxnId) -> Result<usize> {
+        self.entries.len(txn_id).map_err(Error::from).await
+    }
+
+    /// Return `true` if this [`Dir`] is empty at the given `txn_id`.
+    pub async fn is_empty(&self, txn_id: TxnId) -> Result<bool> {
+        self.entries.is_empty(txn_id).map_err(Error::from).await
+    }
+}
+
 impl<TxnId, FE> Dir<TxnId, FE>
 where
     TxnId: Name + Hash + Ord + Copy + fmt::Display + fmt::Debug + 'static,
