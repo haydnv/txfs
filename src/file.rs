@@ -74,7 +74,7 @@ impl<TxnId, FE> File<TxnId, FE> {
 impl<TxnId, FE> File<TxnId, FE>
 where
     TxnId: Name + fmt::Display + fmt::Debug + Hash + Ord + Copy,
-    FE: FileLoad + GetSize + Clone,
+    FE: Clone + Send + Sync,
 {
     pub(super) async fn load(
         txn_id: TxnId,
@@ -87,16 +87,11 @@ where
         );
 
         {
-            let txn_id = txn_id.to_string();
-            let contents = canon.read().await?;
             let mut versions = versions.try_write()?;
+
             versions.truncate();
 
-            versions.create_file(
-                txn_id.to_string(),
-                FE::clone(&*contents),
-                contents.get_size(),
-            )?;
+            versions.copy_file_from(txn_id.to_string(), &canon).await?;
         }
 
         Ok(Self {
@@ -111,11 +106,12 @@ where
 impl<TxnId, FE> File<TxnId, FE>
 where
     TxnId: Name + fmt::Display + fmt::Debug + Hash + Ord + Copy,
-    FE: FileLoad,
+    FE: Send + Sync,
 {
     /// Lock this file for reading at the given `txn_id`.
     pub async fn read<F>(&self, txn_id: TxnId) -> Result<FileVersionRead<TxnId, FE, F>>
     where
+        F: FileLoad,
         FE: AsType<F>,
     {
         let last_modified = self.last_modified.read(txn_id).await?;
@@ -131,6 +127,7 @@ where
     /// Lock this file for reading at the given `txn_id` without borrowing.
     pub async fn into_read<F>(self, txn_id: TxnId) -> Result<FileVersionRead<TxnId, FE, F>>
     where
+        F: FileLoad,
         FE: AsType<F>,
     {
         self.read(txn_id).await
@@ -139,8 +136,8 @@ where
     /// Lock this file for writing at the given `txn_id`.
     pub async fn write<F>(&self, txn_id: TxnId) -> Result<FileVersionWrite<TxnId, FE, F>>
     where
+        F: FileLoad + Clone + GetSize,
         FE: AsType<F>,
-        F: Clone + GetSize,
     {
         let mut last_modified = self.last_modified.write(txn_id).await?;
         let mut versions = self.versions.write().await;
@@ -168,8 +165,8 @@ where
     /// Lock this file for writing at the given `txn_id` without borrowing.
     pub async fn into_write<F>(self, txn_id: TxnId) -> Result<FileVersionWrite<TxnId, FE, F>>
     where
+        F: FileLoad + Clone + GetSize,
         FE: AsType<F>,
-        F: Clone + GetSize,
     {
         self.write(txn_id).await
     }
@@ -178,27 +175,27 @@ where
 impl<TxnId, FE> File<TxnId, FE>
 where
     TxnId: Name + Hash + Ord + PartialOrd<str> + fmt::Debug + Copy + Send + Sync,
-    FE: FileLoad,
-    FE: Clone,
+    FE: for<'a> FileSave<'a> + Send + Sync,
 {
     /// Commit the state of this file at `txn_id`.
     /// This will un-block any pending future write locks.
     /// If this file was modified at `txn_id`, it will replace the canonical version with
     /// the modified version and sync with the host filesystem.
-    pub async fn commit(&self, txn_id: TxnId) {
+    pub async fn commit(&self, txn_id: TxnId)
+    where
+        FE: Clone,
+    {
         let last_modified = self.last_modified.read_and_commit(txn_id).await;
 
         if &**last_modified == &txn_id {
             let versions = self.versions.read().await;
-
-            if let Some(version) = versions.get(&txn_id) {
-                let version = match &*version {
-                    DirEntry::File(file) => file.read().await.expect("version"),
-                    DirEntry::Dir(dir) => panic!("not a file: {:?}", dir),
-                };
-
-                *self.canon.write().await.expect("canon") = FE::clone(&*version);
-                self.canon.sync().await.expect("sync");
+            let version = versions.get(&txn_id).expect("version");
+            match version {
+                DirEntry::File(file) => {
+                    self.canon.overwrite(file).await.expect("overwrite");
+                    self.canon.sync().await.expect("sync");
+                }
+                DirEntry::Dir(dir) => unreachable!("not a file: {:?}", dir),
             }
         }
     }

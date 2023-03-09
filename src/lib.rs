@@ -4,7 +4,7 @@ mod dir;
 mod file;
 
 pub use dir::Dir;
-pub use file::File;
+pub use file::{File, FileVersionRead, FileVersionWrite};
 
 /// The type of error encountered during a transactional filesystem operation
 pub enum ErrorKind {

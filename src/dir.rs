@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::{fmt, io};
 
 use collate::Collator;
-use freqfs::{DirLock, FileLoad, Name};
+use freqfs::{DirLock, FileLoad, FileSave, Name};
 use futures::future::{self, Future, TryFutureExt};
 use futures::join;
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -141,6 +141,14 @@ where
         })
     }
 
+    /// Return `true` if this [`Dir`] has an entry at the given `name` at `txn_id`.
+    pub async fn contains(&self, txn_id: TxnId, name: &str) -> Result<bool> {
+        self.entries
+            .contains_key(txn_id, name)
+            .map_err(Error::from)
+            .await
+    }
+
     /// Create a new [`Dir`] with the given `name` at `txn_id`.
     pub async fn create_dir(&self, txn_id: TxnId, name: String) -> Result<Self> {
         let entry = match self.entries.entry(txn_id, name.clone()).await? {
@@ -207,7 +215,7 @@ where
 impl<TxnId, FE> Dir<TxnId, FE>
 where
     TxnId: Name + fmt::Display + fmt::Debug + Hash + Ord + Copy,
-    FE: FileLoad + GetSize + Clone,
+    FE: Clone + Send + Sync,
 {
     /// Create a new [`File`] with the given `name`, `contents` at `txn_id`.
     pub async fn create_file<F>(
@@ -288,6 +296,7 @@ where
         name: &str,
     ) -> Result<FileVersionRead<TxnId, FE, F>>
     where
+        F: FileLoad,
         FE: AsType<F>,
     {
         if let Some(file) = self.get_file(txn_id, name).await? {
@@ -305,8 +314,8 @@ where
         name: &str,
     ) -> Result<FileVersionWrite<TxnId, FE, F>>
     where
-        FE: AsType<F>,
-        F: Clone + GetSize,
+        F: FileLoad + Clone + GetSize,
+        FE: for<'a> FileSave<'a> + AsType<F>,
     {
         if let Some(file) = self.get_file(txn_id, name).await? {
             file.write(txn_id).await
@@ -319,7 +328,7 @@ where
 impl<TxnId, FE> Dir<TxnId, FE>
 where
     TxnId: Name + PartialOrd<str> + Hash + Copy + Ord + fmt::Debug + Send + Sync,
-    FE: FileLoad + Clone,
+    FE: for<'a> FileSave<'a> + Clone,
 {
     /// Commit the state of this [`Dir`] at `txn_id`.
     pub fn commit<'a>(&'a self, txn_id: TxnId) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
