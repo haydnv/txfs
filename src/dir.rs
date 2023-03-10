@@ -10,11 +10,14 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use get_size::GetSize;
 use safecast::AsType;
 use txn_lock::map::{
-    Entry as TxnMapEntry, Iter, Key, TxnMapLock, TxnMapValueReadGuard, TxnMapValueReadGuardMap,
+    Entry as TxnMapEntry, Iter, TxnMapLock, TxnMapValueReadGuard, TxnMapValueReadGuardMap,
 };
 
 use super::file::*;
 use super::{Error, Result};
+
+/// The name of an entry in a [`Dir`], used to avoid unnecessary [`String`] allocations
+pub type Key = txn_lock::map::Key<String>;
 
 const VERSIONS: &str = ".txfs";
 
@@ -190,13 +193,13 @@ where
     }
 
     /// Construct an iterator over the names of the sub-directories in this [`Dir`] at `txn_id`.
-    pub async fn dir_names(&self, txn_id: TxnId) -> Result<impl Iterator<Item = Key<String>>> {
+    pub async fn dir_names(&self, txn_id: TxnId) -> Result<impl Iterator<Item = Key>> {
         let iterator = self.entries.iter(txn_id).await?;
         Ok(iterator.filter_map(|(name, entry)| if entry.is_dir() { Some(name) } else { None }))
     }
 
     /// Construct an iterator over the names of the files in this [`Dir`] at `txn_id`.
-    pub async fn file_names(&self, txn_id: TxnId) -> Result<impl Iterator<Item = Key<String>>> {
+    pub async fn file_names(&self, txn_id: TxnId) -> Result<impl Iterator<Item = Key>> {
         let iterator = self.entries.iter(txn_id).await?;
         Ok(iterator.filter_map(|(name, entry)| if entry.is_file() { Some(name) } else { None }))
     }
