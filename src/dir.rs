@@ -1,10 +1,8 @@
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::{fmt, io};
 
-use collate::Collator;
 use freqfs::{DirLock, FileLoad, FileSave, Name};
 use futures::future::{self, Future, TryFutureExt};
 use futures::join;
@@ -64,7 +62,7 @@ impl<TxnId, FE> fmt::Debug for DirEntry<TxnId, FE> {
 pub struct Dir<TxnId, FE> {
     canon: DirLock<FE>,
     versions: DirLock<FE>,
-    entries: TxnMapLock<TxnId, Collator<String>, String, DirEntry<TxnId, FE>>,
+    entries: TxnMapLock<TxnId, String, DirEntry<TxnId, FE>>,
 }
 
 impl<TxnId, FE> Clone for Dir<TxnId, FE> {
@@ -105,8 +103,6 @@ where
     /// Load a transactional [`Dir`] from a [`freqfs::DirLock`].
     pub fn load(txn_id: TxnId, canon: DirLock<FE>) -> Pin<Box<dyn Future<Output = Result<Self>>>> {
         Box::pin(async move {
-            let collator = Arc::new(Collator::default());
-
             let (contents, versions) = {
                 let mut dir = canon.try_write()?;
 
@@ -144,7 +140,7 @@ where
             Ok(Self {
                 canon,
                 versions,
-                entries: TxnMapLock::with_contents(txn_id, collator, contents),
+                entries: TxnMapLock::with_contents(txn_id, contents),
             })
         })
     }

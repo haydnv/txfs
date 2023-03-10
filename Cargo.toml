@@ -15,7 +15,6 @@ keywords = ["transactional", "file", "io", "cache"]
 logging = ["log"]
 
 [dependencies]
-collate = { path = "../collate" }
 freqfs = { path = "../freqfs" }
 futures = "0.3"
 get-size = "0.1"
