@@ -92,7 +92,7 @@ impl<TxnId: Copy + Hash + Eq + Ord + fmt::Debug, FE> Dir<TxnId, FE> {
 impl<TxnId, FE> Dir<TxnId, FE>
 where
     TxnId: Name + Hash + Ord + Copy + fmt::Display + fmt::Debug + 'static,
-    FE: FileLoad + GetSize + Clone,
+    FE: Clone + Send + Sync + 'static,
 {
     /// Load a transactional [`Dir`] from a [`freqfs::DirLock`].
     pub fn load(txn_id: TxnId, canon: DirLock<FE>) -> Pin<Box<dyn Future<Output = Result<Self>>>> {
@@ -226,7 +226,7 @@ where
     ) -> Result<File<TxnId, FE>>
     where
         FE: AsType<F>,
-        F: Clone + GetSize,
+        F: GetSize + Clone,
     {
         // this write permit ensures that there is no other pending entry with this name
         let entry = match self.entries.entry(txn_id, name.clone()).await? {
@@ -314,7 +314,7 @@ where
         name: &str,
     ) -> Result<FileVersionWrite<TxnId, FE, F>>
     where
-        F: FileLoad + Clone + GetSize,
+        F: FileLoad + GetSize + Clone,
         FE: for<'a> FileSave<'a> + AsType<F>,
     {
         if let Some(file) = self.get_file(txn_id, name).await? {
@@ -331,7 +331,7 @@ where
     FE: for<'a> FileSave<'a> + Clone,
 {
     /// Commit the state of this [`Dir`] at `txn_id`.
-    pub fn commit<'a>(&'a self, txn_id: TxnId) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
+    pub fn commit<'a>(&'a self, txn_id: TxnId) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
             let (contents, deltas) = self.entries.read_and_commit(txn_id).await;
             let commits = FuturesUnordered::new();
@@ -373,7 +373,7 @@ where
     }
 
     /// Roll back the state of this [`Dir`] at `txn_id`.
-    pub fn rollback<'a>(&'a self, txn_id: TxnId) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
+    pub fn rollback<'a>(&'a self, txn_id: TxnId) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
             let (contents, deltas) = self.entries.read_and_rollback(txn_id).await;
             let rollbacks = FuturesUnordered::new();
