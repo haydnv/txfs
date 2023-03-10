@@ -100,11 +100,14 @@ impl<TxnId: Copy + Hash + Eq + Ord + fmt::Debug, FE> Dir<TxnId, FE> {
 
 impl<TxnId, FE> Dir<TxnId, FE>
 where
-    TxnId: Name + Hash + Ord + Copy + fmt::Display + fmt::Debug + 'static,
+    TxnId: Name + Hash + Ord + Copy + fmt::Display + fmt::Debug + Send + Sync + 'static,
     FE: Clone + Send + Sync + 'static,
 {
     /// Load a transactional [`Dir`] from a [`freqfs::DirLock`].
-    pub fn load(txn_id: TxnId, canon: DirLock<FE>) -> Pin<Box<dyn Future<Output = Result<Self>>>> {
+    pub fn load(
+        txn_id: TxnId,
+        canon: DirLock<FE>,
+    ) -> Pin<Box<dyn Future<Output = Result<Self>> + Send>> {
         Box::pin(async move {
             let (contents, versions) = {
                 let mut dir = canon.try_write()?;
