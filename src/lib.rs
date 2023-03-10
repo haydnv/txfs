@@ -3,7 +3,7 @@ use std::{fmt, io};
 mod dir;
 mod file;
 
-pub use dir::Dir;
+pub use dir::{Dir, DirEntry};
 pub use file::{File, FileVersionRead, FileVersionWrite};
 
 /// The type of error encountered during a transactional filesystem operation

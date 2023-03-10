@@ -12,7 +12,7 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use get_size::GetSize;
 use safecast::AsType;
 use txn_lock::map::{
-    Entry as TxnMapEntry, TxnMapLock, TxnMapValueReadGuard, TxnMapValueReadGuardMap,
+    Entry as TxnMapEntry, Iter, Key, TxnMapLock, TxnMapValueReadGuard, TxnMapValueReadGuardMap,
 };
 
 use super::file::*;
@@ -20,7 +20,8 @@ use super::{Error, Result};
 
 const VERSIONS: &str = ".txfs";
 
-enum DirEntry<TxnId, FE> {
+/// An entry in a [`Dir`]
+pub enum DirEntry<TxnId, FE> {
     Dir(Dir<TxnId, FE>),
     File(File<TxnId, FE>),
 }
@@ -35,6 +36,13 @@ impl<TxnId, FE> Clone for DirEntry<TxnId, FE> {
 }
 
 impl<TxnId, FE> DirEntry<TxnId, FE> {
+    fn is_dir(&self) -> bool {
+        match self {
+            Self::Dir(_) => true,
+            _ => false,
+        }
+    }
+
     fn is_file(&self) -> bool {
         match self {
             Self::File(_) => true,
@@ -183,6 +191,23 @@ where
         } else {
             Ok(false)
         }
+    }
+
+    /// Construct an iterator over the names of the sub-directories in this [`Dir`] at `txn_id`.
+    pub async fn dir_names(&self, txn_id: TxnId) -> Result<impl Iterator<Item = Key<String>>> {
+        let iterator = self.entries.iter(txn_id).await?;
+        Ok(iterator.filter_map(|(name, entry)| if entry.is_dir() { Some(name) } else { None }))
+    }
+
+    /// Construct an iterator over the names of the files in this [`Dir`] at `txn_id`.
+    pub async fn file_names(&self, txn_id: TxnId) -> Result<impl Iterator<Item = Key<String>>> {
+        let iterator = self.entries.iter(txn_id).await?;
+        Ok(iterator.filter_map(|(name, entry)| if entry.is_file() { Some(name) } else { None }))
+    }
+
+    /// Construct an iterator over the contents of this [`Dir`] at `txn_id`.
+    pub async fn iter(&self, txn_id: TxnId) -> Result<Iter<TxnId, String, DirEntry<TxnId, FE>>> {
+        self.entries.iter(txn_id).map_err(Error::from).await
     }
 
     /// Get a sub-directory in this [`Dir`] at the given `txn_id`.
