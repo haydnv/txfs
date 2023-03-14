@@ -108,24 +108,42 @@ where
         txn_id: TxnId,
         canon: DirLock<FE>,
     ) -> Pin<Box<dyn Future<Output = Result<Self>> + Send>> {
+        #[cfg(feature = "log")]
+        log::debug!("load transactional dir from {:?}", canon);
+
         Box::pin(async move {
             let (contents, versions) = {
-                let mut dir = canon.try_write()?;
+                #[cfg(feature = "log")]
+                log::trace!("lock canonical dir for writing");
+
+                let mut dir = canon.write().await;
 
                 let versions = dir.get_or_create_dir(VERSIONS.to_string())?;
 
                 let contents = {
-                    let mut versions = versions.try_write()?;
+                    #[cfg(feature = "log")]
+                    log::trace!("lock version dir for writing");
+
+                    let mut versions = versions.write().await;
                     versions.truncate();
 
                     let mut contents = HashMap::new();
 
                     for (name, entry) in dir.iter() {
+                        if name == VERSIONS {
+                            continue;
+                        }
+
                         let entry = match entry.clone() {
                             freqfs::DirEntry::Dir(dir) => {
+                                #[cfg(feature = "log")]
+                                log::trace!("load sub-dir {}: {:?}", name, dir);
                                 Self::load(txn_id, dir).map_ok(DirEntry::Dir).await?
                             }
                             freqfs::DirEntry::File(file) => {
+                                #[cfg(feature = "log")]
+                                log::trace!("load file {}: {:?}", name, file);
+
                                 let file_versions = versions.create_dir(name.clone())?;
 
                                 File::load(txn_id, file, file_versions)
