@@ -19,7 +19,8 @@ use super::{Error, Result};
 /// The name of an entry in a [`Dir`], used to avoid unnecessary [`String`] allocations
 pub type Key = txn_lock::map::Key<String>;
 
-const VERSIONS: &str = ".txfs";
+/// The name of the directory where un-committed file versions are cached
+pub const VERSIONS: &str = ".txfs";
 
 /// An entry in a [`Dir`]
 pub enum DirEntry<TxnId, FE> {
