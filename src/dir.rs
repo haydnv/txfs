@@ -230,7 +230,7 @@ where
     pub async fn files<F>(
         &self,
         txn_id: TxnId,
-    ) -> Result<impl Stream<Item = Result<(Key, FileVersionRead<TxnId, FE, F>)>> + Send + '_>
+    ) -> Result<impl Stream<Item = Result<(Key, FileVersionRead<TxnId, FE, F>)>> + Send + Unpin + '_>
     where
         FE: AsType<F>,
         F: FileLoad,
@@ -244,7 +244,7 @@ where
         let files = stream::iter(files)
             .then(move |(name, file)| file.into_read(txn_id).map_ok(|file| (name, file)));
 
-        Ok(files)
+        Ok(Box::pin(files))
     }
 
     /// Construct an iterator over the contents of this [`Dir`] at `txn_id`.
