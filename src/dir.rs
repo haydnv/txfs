@@ -6,7 +6,7 @@ use std::{fmt, io};
 use freqfs::{DirLock, FileLoad, FileSave, Name};
 use futures::future::{self, Future, TryFutureExt};
 use futures::join;
-use futures::stream::{FuturesUnordered, StreamExt};
+use futures::stream::{self, FuturesUnordered, Stream, StreamExt};
 use get_size::GetSize;
 use safecast::AsType;
 use txn_lock::map::{
@@ -224,6 +224,27 @@ where
     pub async fn file_names(&self, txn_id: TxnId) -> Result<impl Iterator<Item = Key>> {
         let iterator = self.entries.iter(txn_id).await?;
         Ok(iterator.filter_map(|(name, entry)| if entry.is_file() { Some(name) } else { None }))
+    }
+
+    /// Construct an iterator over the contents of the files in this [`Dir`] at `txn_id`.
+    pub async fn files<F>(
+        &self,
+        txn_id: TxnId,
+    ) -> Result<impl Stream<Item = Result<(Key, FileVersionRead<TxnId, FE, F>)>> + Send + '_>
+    where
+        FE: AsType<F>,
+        F: FileLoad,
+    {
+        let entries = self.entries.iter(txn_id).await?;
+        let files = entries.filter_map(|(name, entry)| match &*entry {
+            DirEntry::File(file) => Some((name, file.clone())),
+            _ => None,
+        });
+
+        let files = stream::iter(files)
+            .then(move |(name, file)| file.into_read(txn_id).map_ok(|file| (name, file)));
+
+        Ok(files)
     }
 
     /// Construct an iterator over the contents of this [`Dir`] at `txn_id`.
