@@ -81,11 +81,6 @@ where
         canon: FileLock<FE>,
         versions: DirLock<FE>,
     ) -> Result<Self> {
-        debug_assert_eq!(
-            canon.path().parent(),
-            versions.try_read().expect("versions").path().parent(),
-        );
-
         {
             let mut versions = versions.try_write()?;
 
