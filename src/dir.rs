@@ -144,7 +144,7 @@ where
                     let mut contents = HashMap::new();
 
                     for (name, entry) in canon.try_read()?.iter() {
-                        if name == VERSIONS {
+                        if name.starts_with('.') {
                             continue;
                         }
 
@@ -297,7 +297,7 @@ where
     }
 
     /// Delete the contents of this [`Dir`] at `txn_id`.
-    pub fn truncate(self, txn_id: TxnId) -> Pin<Box<dyn Future<Output = Result<()>>>> {
+    pub fn truncate(self, txn_id: TxnId) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
         Box::pin(async move {
             let entries = self.entries.clear(txn_id).map_err(Error::from).await?;
 
@@ -426,24 +426,28 @@ where
     FE: for<'a> FileSave<'a> + Clone,
 {
     /// Commit the state of this [`Dir`] at `txn_id`.
-    pub fn commit<'a>(&'a self, txn_id: TxnId) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+    pub fn commit<'a>(&'a self, txn_id: TxnId, recursive: bool) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         #[cfg(feature = "logging")]
         log::debug!("commit Dir at {:?}...", txn_id);
 
         Box::pin(async move {
             let (contents, deltas) = self.entries.read_and_commit(txn_id).await;
 
-            let commits = FuturesUnordered::new();
+            if recursive {
+                let commits = FuturesUnordered::new();
 
-            for (_name, entry) in &*contents {
-                let entry = DirEntry::clone(&*entry);
+                for (_name, entry) in &*contents {
+                    let entry = DirEntry::clone(&*entry);
 
-                commits.push(async move {
-                    match entry {
-                        DirEntry::Dir(dir) => dir.commit(txn_id).await,
-                        DirEntry::File(file) => file.commit(txn_id).await,
-                    }
-                });
+                    commits.push(async move {
+                        match entry {
+                            DirEntry::Dir(dir) => dir.commit(txn_id, recursive).await,
+                            DirEntry::File(file) => file.commit(txn_id).await,
+                        }
+                    });
+                }
+
+                commits.fold((), |(), ()| future::ready(())).await;
             }
 
             let mut needs_sync = false;
@@ -455,16 +459,13 @@ where
                         assert!(!contents.contains_key(&**name));
 
                         if let Some(entry) = canon.get(&**name) {
-                            if entry.is_file() {
-                                canon.delete(&**name).await;
-                                needs_sync = true;
-                            }
+                            needs_sync = needs_sync || entry.is_file();
                         }
+
+                        canon.delete(&**name).await;
                     }
                 }
             };
-
-            commits.fold((), |(), ()| future::ready(())).await;
 
             if needs_sync {
                 // remove the canonical version of any file that was deleted in this transaction
@@ -474,23 +475,26 @@ where
     }
 
     /// Roll back the state of this [`Dir`] at `txn_id`.
-    pub fn rollback<'a>(&'a self, txn_id: TxnId) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+    pub fn rollback<'a>(&'a self, txn_id: TxnId, recursive: bool) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
             let (contents, _deltas) = self.entries.read_and_rollback(txn_id).await;
-            let rollbacks = FuturesUnordered::new();
 
-            for (_name, entry) in &*contents {
-                let entry = DirEntry::clone(&*entry);
+            if recursive {
+                let rollbacks = FuturesUnordered::new();
 
-                rollbacks.push(async move {
-                    match entry {
-                        DirEntry::Dir(dir) => dir.rollback(txn_id).await,
-                        DirEntry::File(file) => file.rollback(txn_id).await,
-                    }
-                });
+                for (_name, entry) in &*contents {
+                    let entry = DirEntry::clone(&*entry);
+
+                    rollbacks.push(async move {
+                        match entry {
+                            DirEntry::Dir(dir) => dir.rollback(txn_id, recursive).await,
+                            DirEntry::File(file) => file.rollback(txn_id).await,
+                        }
+                    });
+                }
+
+                rollbacks.fold((), |(), ()| future::ready(())).await;
             }
-
-            rollbacks.fold((), |(), ()| future::ready(())).await;
         })
     }
 

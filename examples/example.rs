@@ -105,8 +105,8 @@ async fn run_example(cache: DirLock<File>) -> Result<(), txfs::Error> {
     // but a write in the past will block a read in the future
     assert!(root.try_get_file(second_txn, "file one").is_err());
 
-    // committing a Dir commits all its children
-    root.commit(first_txn).await;
+    // committing a Dir with recursive=true commits all its children
+    root.commit(first_txn, true).await;
 
     let subdir = root.create_dir(second_txn, "subdir".into()).await?;
 
@@ -114,16 +114,32 @@ async fn run_example(cache: DirLock<File>) -> Result<(), txfs::Error> {
         .create_file(second_txn, "file two".into(), vec![2, 3, 4])
         .await?;
 
-    root.commit(second_txn).await;
+    root.commit(second_txn, true).await;
 
     // deleting a directory will delete all its children, recursively
     root.delete(third_txn, "subdir".into()).await?;
 
     // accessing "subdir" after this can cause the filesystem to get out of sync with the cache!
-    root.commit(third_txn).await;
+    root.commit(third_txn, true).await;
 
     // call "finalize" to drop all information about commits earlier than the given transaction ID
     root.finalize(third_txn).await;
+
+    let fourth_txn = TxnId(4);
+
+    // anything that was deleted is now safe to re-create
+    let subdir = root.create_dir(fourth_txn, "subdir".to_string()).await?;
+
+    let file = subdir
+        .create_file(fourth_txn, "file two".into(), vec![3, 4, 5])
+        .await?;
+
+    root.commit(fourth_txn, true).await;
+
+    let fifth_txn = TxnId(5);
+
+    // and access in later transactions
+    assert_eq!(&*file.read::<Vec<u8>>(fifth_txn).await?, &[3u8, 4, 5]);
 
     Ok(())
 }
