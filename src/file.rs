@@ -1,7 +1,7 @@
-use std::fmt;
 use std::hash::Hash;
-use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
+use std::sync::Arc;
+use std::{fmt, io};
 
 use freqfs::*;
 use get_size::GetSize;
@@ -47,27 +47,19 @@ impl<TxnId, FE, F> DerefMut for FileVersionWrite<TxnId, FE, F> {
 /// A transactional file
 pub struct File<TxnId, FE> {
     last_modified: TxnLock<TxnId, TxnId>,
-    canon: FileLock<FE>,
     versions: DirLock<FE>,
-    phantom: PhantomData<TxnId>,
+    parent: DirLock<FE>,
+    name: Arc<String>,
 }
 
 impl<TxnId, FE> Clone for File<TxnId, FE> {
     fn clone(&self) -> Self {
         Self {
             last_modified: self.last_modified.clone(),
-            canon: self.canon.clone(),
             versions: self.versions.clone(),
-            phantom: PhantomData,
+            parent: self.parent.clone(),
+            name: self.name.clone(),
         }
-    }
-}
-
-impl<TxnId, FE> File<TxnId, FE> {
-    /// Destructure this [`File`] into its underlying [`FileLock`].
-    /// The caller of this method must implement transactional state management explicitly.
-    pub fn into_inner(self) -> FileLock<FE> {
-        self.canon
     }
 }
 
@@ -76,24 +68,79 @@ where
     TxnId: Name + fmt::Display + fmt::Debug + Hash + Ord + Copy,
     FE: Clone + Send + Sync,
 {
-    pub(super) async fn load(
+    pub(super) async fn create<F>(
         txn_id: TxnId,
-        canon: FileLock<FE>,
+        name: String,
+        parent: DirLock<FE>,
         versions: DirLock<FE>,
-    ) -> Result<Self> {
+        version: F,
+    ) -> Result<Self>
+    where
+        FE: AsType<F>,
+        F: GetSize,
+    {
+        debug_assert!(versions
+            .try_read()
+            .expect("version dir")
+            .path()
+            .ends_with(&name));
+
         {
-            let mut versions = versions.try_write()?;
-
-            versions.truncate();
-
-            versions.copy_file_from(txn_id.to_string(), &canon).await?;
+            let size = version.get_size();
+            let mut versions = versions.write().await;
+            versions.create_file(txn_id.to_string(), version, size)?;
         }
 
         Ok(Self {
             last_modified: TxnLock::new(txn_id),
-            canon,
             versions,
-            phantom: PhantomData,
+            parent,
+            name: Arc::new(name),
+        })
+    }
+
+    pub(super) async fn load(
+        txn_id: TxnId,
+        name: String,
+        parent: DirLock<FE>,
+        versions: DirLock<FE>,
+    ) -> Result<Self> {
+        debug_assert!(versions
+            .try_read()
+            .expect("version dir")
+            .path()
+            .ends_with(&name));
+
+        {
+            let parent = parent.try_read()?;
+            let canon = parent.get_file(&name).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!(
+                        "cannot load the transactional file {} without a canonical version",
+                        name
+                    ),
+                )
+            })?;
+
+            let mut versions = versions.try_write()?;
+
+            versions.truncate();
+
+            #[cfg(feature = "logging")]
+            log::trace!("truncated any obsolete versions of {:?}", name);
+
+            versions.copy_file_from(txn_id.to_string(), &canon).await?;
+
+            #[cfg(feature = "logging")]
+            log::trace!("copied canonical version of {:?}", canon);
+        }
+
+        Ok(Self {
+            last_modified: TxnLock::new(txn_id),
+            versions,
+            parent,
+            name: Arc::new(name),
         })
     }
 }
@@ -184,13 +231,20 @@ where
 
         if &**last_modified == &txn_id {
             let versions = self.versions.read().await;
-            let version = versions.get(&txn_id).expect("version");
-            match version {
-                DirEntry::File(file) => {
-                    self.canon.overwrite(file).await.expect("overwrite");
-                    self.canon.sync().await.expect("sync");
-                }
-                DirEntry::Dir(dir) => unreachable!("not a file: {:?}", dir),
+            if let DirEntry::File(file) = versions.get(&txn_id).expect("version") {
+                let mut parent = self.parent.write().await;
+
+                let canon = parent
+                    .copy_file_from(self.name.to_string(), file)
+                    .await
+                    .expect("copy canonical version");
+
+                canon
+                    .sync()
+                    .await
+                    .expect("sync canonical version with the filesystem");
+            } else {
+                unreachable!("transactional file out of sync with filesystem");
             }
         }
     }
@@ -223,6 +277,12 @@ where
 
 impl<TxnId, FE> fmt::Debug for File<TxnId, FE> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "transactional {:?}", self.canon)
+        #[cfg(debug_assertions)]
+        write!(f, "transactional file {}", self.name)?;
+
+        #[cfg(not(debug_assertions))]
+        f.write_str("transactional file")?;
+
+        Ok(())
     }
 }

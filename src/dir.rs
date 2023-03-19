@@ -5,7 +5,6 @@ use std::{fmt, io};
 
 use freqfs::{DirLock, FileLoad, FileSave, Name};
 use futures::future::{self, Future, TryFutureExt};
-use futures::join;
 use futures::stream::{self, FuturesUnordered, Stream, StreamExt};
 use get_size::GetSize;
 use safecast::AsType;
@@ -88,6 +87,19 @@ impl<TxnId, FE> Dir<TxnId, FE> {
 }
 
 impl<TxnId: Copy + Hash + Eq + Ord + fmt::Debug, FE> Dir<TxnId, FE> {
+    /// Return `true` if there is at least one [`File`] in this [`Dir`] at `txn_id`.
+    pub async fn contains_files(&self, txn_id: TxnId) -> Result<bool> {
+        let entries = self.entries.iter(txn_id).await?;
+
+        for (_, entry) in entries {
+            if entry.is_file() {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
+
     /// Return the number of entries in this [`Dir`] as of the given `txn_id`.
     pub async fn len(&self, txn_id: TxnId) -> Result<usize> {
         self.entries.len(txn_id).map_err(Error::from).await
@@ -142,12 +154,17 @@ where
                                 Self::load(txn_id, dir).map_ok(DirEntry::Dir).await?
                             }
                             freqfs::DirEntry::File(file) => {
+                                debug_assert!(file.path().exists());
+
                                 #[cfg(feature = "log")]
                                 log::trace!("load file {}: {:?}", name, file);
 
                                 let file_versions = versions.create_dir(name.clone())?;
 
-                                File::load(txn_id, file, file_versions)
+                                #[cfg(feature = "log")]
+                                log::trace!("created versions dir for file {}: {:?}", name, file);
+
+                                File::load(txn_id, name.clone(), canon.clone(), file_versions)
                                     .map_ok(DirEntry::File)
                                     .await?
                             }
@@ -307,25 +324,15 @@ where
             TxnMapEntry::Vacant(entry) => entry,
         };
 
-        let (mut canon, mut versions) = join!(self.canon.write(), self.versions.write());
+        let versions = {
+            let mut versions = self.versions.write().await;
+            versions.get_or_create_dir(name.clone())?
+        };
 
-        // but any prior version must be discarded
-        canon.delete(&name).await;
+        let file = File::create(txn_id, name, self.canon.clone(), versions, contents).await?;
 
-        // so that it's safe to create a new file with its own versions
-        let size = contents.get_size();
-        let file = canon.create_file(name.clone(), contents, size)?;
-        let file_versions = versions.get_or_create_dir(name)?;
-
-        // again, make sure to discard any un-committed versions
-        file_versions
-            .try_write()
-            .expect("file version dir")
-            .truncate()
-            .await;
-
-        let file = File::load(txn_id, file, file_versions).await?;
         entry.insert(DirEntry::File(file.clone()));
+
         Ok(file)
     }
 
