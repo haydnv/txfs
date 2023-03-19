@@ -1,3 +1,6 @@
+//! A transactional filesystem cache layer based on [`freqfs`].
+//! See the "examples" directory for usage examples.
+
 use std::{fmt, io};
 
 mod dir;

@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+use std::fmt;
 use std::io;
 use std::path::PathBuf;
 
@@ -7,6 +9,41 @@ use rand::Rng;
 use safecast::as_type;
 use tokio::fs;
 use txfs::Dir;
+
+#[derive(Copy, Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
+struct TxnId(u64);
+
+impl PartialEq<str> for TxnId {
+    fn eq(&self, other: &str) -> bool {
+        if let Ok(other) = other.parse() {
+            self.0 == other
+        } else {
+            false
+        }
+    }
+}
+
+impl PartialOrd<str> for TxnId {
+    fn partial_cmp(&self, other: &str) -> Option<Ordering> {
+        if let Ok(other) = other.parse() {
+            self.0.partial_cmp(&other)
+        } else {
+            None
+        }
+    }
+}
+
+impl freqfs::Name for TxnId {
+    fn partial_cmp(&self, key: &String) -> Option<Ordering> {
+        freqfs::Name::partial_cmp(&self.0, key)
+    }
+}
+
+impl fmt::Display for TxnId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
 #[derive(Clone)]
 enum File {
@@ -39,10 +76,53 @@ async fn setup_tmp_dir() -> Result<PathBuf, io::Error> {
 }
 
 async fn run_example(cache: DirLock<File>) -> Result<(), txfs::Error> {
-    let first_txn_id = 1;
-    let _root = Dir::load(first_txn_id, cache).await?;
+    let first_txn = TxnId(1);
+    let second_txn = TxnId(2);
+    let third_txn = TxnId(3);
 
-    // TODO
+    let root = Dir::load(first_txn, cache).await?;
+
+    // just holding a reference to a file doesn't block any transactional I/O
+    let file = root.create_file(
+        first_txn,
+        "file one".into(),
+        String::from("file one contents"),
+    )
+    .await?;
+
+    {
+        let read_guard = file.read::<String>(first_txn).await?;
+
+        // but holding a read guard will block acquiring a write guard, and vice versa
+        // let read_guard = file.read::<String>(first_txn).await?;
+        assert_eq!(&*read_guard, "file one contents");
+
+        // a read in the past won't block a write in the future
+        assert!(file.write::<String>(second_txn).await.is_ok());
+    }
+
+    // but a write in the past will block a read in the future
+    assert!(root.try_get_file(second_txn, "file one").is_err());
+
+    // committing a Dir commits all its children
+    root.commit(first_txn).await;
+
+    let subdir = root.create_dir(second_txn, "subdir".into()).await?;
+
+    subdir
+        .create_file(second_txn, "file two".into(), vec![2, 3, 4])
+        .await?;
+
+    root.commit(second_txn).await;
+
+    // deleting a directory will delete all its children, recursively
+    root.delete(third_txn, "subdir".into()).await?;
+
+    // accessing "subdir" after this can cause the filesystem to get out of sync with the cache!
+    root.commit(third_txn).await;
+
+    // call "finalize" to drop all information about commits earlier than the given transaction ID
+    root.finalize(third_txn).await;
 
     Ok(())
 }
