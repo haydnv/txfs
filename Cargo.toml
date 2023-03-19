@@ -9,10 +9,16 @@ repository = "https://github.com/haydnv/txfs"
 readme = "README.md"
 
 categories = ["caching", "data-structures", "filesystem", "memory-management"]
-keywords = ["transactional", "file", "io", "cache"]
+keywords = ["transactional", "versioned", "versioning", "file", "io", "cache"]
+
+[[example]]
+name = "example"
+required-features = ["stream"]
 
 [features]
-logging = ["log", "freqfs/logging"]
+all = ["logging", "stream"]
+logging = ["log", "freqfs/logging", "txn_lock/logging"]
+stream = ["freqfs/stream"]
 
 [dependencies]
 freqfs = { path = "../freqfs" }
@@ -21,3 +27,8 @@ get-size = "0.1"
 log = { version = "0.4", features = ["release_max_level_info"], optional = true }
 safecast = { path = "../safecast" }
 txn_lock = { path = "../txn_lock" }
+
+[dev-dependencies]
+destream = { path = "../destream" }
+rand = "0.8"
+tokio = { version = "1.25", features = ["macros"] }
