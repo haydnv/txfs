@@ -83,12 +83,13 @@ async fn run_example(cache: DirLock<File>) -> Result<(), txfs::Error> {
     let root = Dir::load(first_txn, cache).await?;
 
     // just holding a reference to a file doesn't block any transactional I/O
-    let file = root.create_file(
-        first_txn,
-        "file one".into(),
-        String::from("file one contents"),
-    )
-    .await?;
+    let file = root
+        .create_file(
+            first_txn,
+            "file one".into(),
+            String::from("file one contents"),
+        )
+        .await?;
 
     {
         let read_guard = file.read::<String>(first_txn).await?;

@@ -33,7 +33,15 @@ pub struct Error {
 }
 
 impl Error {
-    /// Destructure this error information
+    /// Construct an [`Error`].
+    pub fn new<I: fmt::Display>(kind: ErrorKind, message: I) -> Self {
+        Self {
+            kind,
+            message: message.to_string(),
+        }
+    }
+
+    /// Destructure this error information.
     pub fn into_inner(self) -> (ErrorKind, String) {
         (self.kind, self.message)
     }

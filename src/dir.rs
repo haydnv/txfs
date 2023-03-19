@@ -129,9 +129,10 @@ where
                 #[cfg(feature = "log")]
                 log::trace!("lock canonical dir for writing");
 
-                let mut dir = canon.write().await;
-
-                let versions = dir.get_or_create_dir(VERSIONS.to_string())?;
+                let versions = {
+                    let mut dir = canon.write().await;
+                    dir.get_or_create_dir(VERSIONS.to_string())?
+                };
 
                 let contents = {
                     #[cfg(feature = "log")]
@@ -142,7 +143,7 @@ where
 
                     let mut contents = HashMap::new();
 
-                    for (name, entry) in dir.iter() {
+                    for (name, entry) in canon.try_read()?.iter() {
                         if name == VERSIONS {
                             continue;
                         }

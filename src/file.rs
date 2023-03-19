@@ -8,7 +8,7 @@ use get_size::GetSize;
 use safecast::AsType;
 use txn_lock::scalar::{TxnLock, TxnLockReadGuard, TxnLockWriteGuard};
 
-use super::Result;
+use super::{Error, ErrorKind, Result};
 
 /// A read guard on a version of a transactional [`File`]
 pub struct FileVersionRead<TxnId, FE, F> {
@@ -105,6 +105,9 @@ where
         parent: DirLock<FE>,
         versions: DirLock<FE>,
     ) -> Result<Self> {
+        #[cfg(feature = "logging")]
+        log::debug!("load file {} into the transactional filesystem cache", name);
+
         debug_assert!(versions
             .try_read()
             .expect("version dir")
@@ -112,7 +115,16 @@ where
             .ends_with(&name));
 
         {
-            let parent = parent.read().await;
+            let parent = parent.try_read().map_err(|cause| {
+                Error::new(
+                    ErrorKind::Conflict,
+                    format!(
+                        "cannot load file {} since its parent directory is locked for writing: {}",
+                        name, cause
+                    ),
+                )
+            })?;
+
             let canon = parent.get_file(&name).ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::NotFound,
@@ -122,6 +134,9 @@ where
                     ),
                 )
             })?;
+
+            #[cfg(feature = "logging")]
+            log::trace!("acquiring write lock on versions dir for file {}...", name);
 
             let mut versions = versions.write().await;
 
