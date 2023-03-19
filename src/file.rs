@@ -112,7 +112,7 @@ where
             .ends_with(&name));
 
         {
-            let parent = parent.try_read()?;
+            let parent = parent.read().await;
             let canon = parent.get_file(&name).ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::NotFound,
@@ -123,7 +123,7 @@ where
                 )
             })?;
 
-            let mut versions = versions.try_write()?;
+            let mut versions = versions.write().await;
 
             versions.truncate();
 
