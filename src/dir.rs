@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::pin::Pin;
 use std::{fmt, io};
@@ -426,7 +426,11 @@ where
     FE: for<'a> FileSave<'a> + Clone,
 {
     /// Commit the state of this [`Dir`] at `txn_id`.
-    pub fn commit<'a>(&'a self, txn_id: TxnId, recursive: bool) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+    pub fn commit<'a>(
+        &'a self,
+        txn_id: TxnId,
+        recursive: bool,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         #[cfg(feature = "logging")]
         log::debug!("commit Dir at {:?}...", txn_id);
 
@@ -475,7 +479,11 @@ where
     }
 
     /// Roll back the state of this [`Dir`] at `txn_id`.
-    pub fn rollback<'a>(&'a self, txn_id: TxnId, recursive: bool) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+    pub fn rollback<'a>(
+        &'a self,
+        txn_id: TxnId,
+        recursive: bool,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
             let (contents, _deltas) = self.entries.read_and_rollback(txn_id).await;
 
@@ -500,9 +508,72 @@ where
 
     /// Finalize the state of this [`Dir`] at `txn_id`.
     pub async fn finalize(&self, txn_id: TxnId) {
-        self.canon.trim().await.expect("trim empty subdirectories");
-        self.canon.sync().await.expect("sync canonical directory");
-        self.entries.finalize(txn_id);
+        let mut sync_canon = false;
+
+        if let Some(entries) = self.entries.read_and_finalize(txn_id) {
+            let names = entries
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect::<HashSet<_>>();
+
+            let delete_versions = {
+                let mut versions = self.versions.write().await;
+                let mut to_delete = Vec::with_capacity(versions.len());
+
+                for (name, entry) in versions.iter() {
+                    if names.contains(name) || name.starts_with('.') {
+                        continue;
+                    }
+
+                    // this assumes that a file's version directory will only be empty
+                    // after the last file version has been finalized
+                    // and before any new version has been created
+                    if let freqfs::DirEntry::Dir(dir) = entry {
+                        let dir = dir.read().await;
+                        if dir.is_empty() {
+                            to_delete.push(name.clone());
+                        }
+                    }
+                }
+
+                for name in to_delete {
+                    versions.delete(&name);
+                }
+
+                versions.is_empty()
+            };
+
+            let mut canon = self.canon.write().await;
+            let mut to_delete = Vec::with_capacity(canon.len());
+
+            for (name, entry) in canon.iter() {
+                if names.contains(name) || name.starts_with('.') {
+                    continue;
+                }
+
+                // this assumes that a directory will be empty after all its files are deleted
+                if let freqfs::DirEntry::Dir(dir) = entry {
+                    let dir = dir.read().await;
+                    if dir.is_empty() {
+                        to_delete.push(name.clone());
+                        sync_canon = true;
+                    }
+                }
+            }
+
+            for name in to_delete {
+                canon.delete(&name);
+            }
+
+            if delete_versions {
+                canon.delete(VERSIONS);
+                sync_canon = true;
+            }
+        }
+
+        if sync_canon {
+            self.canon.sync().await.expect("sync canonical directory");
+        }
     }
 }
 
