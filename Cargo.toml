@@ -21,13 +21,13 @@ logging = ["log", "freqfs/logging", "txn_lock/logging"]
 stream = ["freqfs/stream"]
 
 [dependencies]
-freqfs = { path = "../freqfs" }
+freqfs = { path = "../freqfs", features = ["all"] }
 futures = "0.3"
 get-size = "0.1"
 hr-id = { path = "../hr-id" }
 log = { version = "0.4", features = ["release_max_level_info"], optional = true }
 safecast = { path = "../safecast" }
-txn_lock = { path = "../txn_lock" }
+txn_lock = { path = "../txn_lock", features = ["all"] }
 
 [dev-dependencies]
 destream = { path = "../destream" }

@@ -516,7 +516,7 @@ where
         if let Some(entries) = self.entries.read_and_finalize(txn_id) {
             let names = entries
                 .into_iter()
-                .map(|(name, _)| name)
+                .map(|(name, _)| name.to_string())
                 .collect::<HashSet<_>>();
 
             let delete_versions = {
@@ -534,13 +534,13 @@ where
                     if let freqfs::DirEntry::Dir(dir) = entry {
                         let dir = dir.read().await;
                         if dir.is_empty() {
-                            to_delete.push(name.clone());
+                            to_delete.push(name.to_string());
                         }
                     }
                 }
 
                 for name in to_delete {
-                    versions.delete(&name);
+                    versions.delete(name.as_str());
                 }
 
                 versions.is_empty()
