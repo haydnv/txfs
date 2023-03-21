@@ -5,6 +5,7 @@ use std::{fmt, io};
 
 use freqfs::*;
 use get_size::GetSize;
+use hr_id::Id;
 use safecast::AsType;
 use txn_lock::scalar::{TxnLock, TxnLockReadGuard, TxnLockWriteGuard};
 
@@ -49,7 +50,7 @@ pub struct File<TxnId, FE> {
     last_modified: TxnLock<TxnId, TxnId>,
     versions: DirLock<FE>,
     parent: DirLock<FE>,
-    name: Arc<String>,
+    name: Arc<Id>,
 }
 
 impl<TxnId, FE> Clone for File<TxnId, FE> {
@@ -70,7 +71,7 @@ where
 {
     pub(super) async fn create<F>(
         txn_id: TxnId,
-        name: String,
+        name: Id,
         parent: DirLock<FE>,
         versions: DirLock<FE>,
         version: F,
@@ -101,7 +102,7 @@ where
 
     pub(super) async fn load(
         txn_id: TxnId,
-        name: String,
+        name: Id,
         parent: DirLock<FE>,
         versions: DirLock<FE>,
     ) -> Result<Self> {

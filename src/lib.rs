@@ -3,11 +3,12 @@
 
 use std::{fmt, io};
 
-mod dir;
-mod file;
-
 pub use dir::{Dir, DirEntry, Key, VERSIONS};
 pub use file::{File, FileVersionRead, FileVersionWrite};
+pub use hr_id::Id;
+
+mod dir;
+mod file;
 
 /// The type of error encountered during a transactional filesystem operation
 pub enum ErrorKind {
@@ -47,10 +48,10 @@ impl Error {
     }
 }
 
-impl From<txn_lock::Error> for Error {
-    fn from(cause: txn_lock::Error) -> Self {
+impl From<hr_id::ParseError> for Error {
+    fn from(cause: hr_id::ParseError) -> Self {
         Self {
-            kind: ErrorKind::Conflict,
+            kind: ErrorKind::IO,
             message: cause.to_string(),
         }
     }
@@ -66,6 +67,15 @@ impl From<io::Error> for Error {
 
         Self {
             kind,
+            message: cause.to_string(),
+        }
+    }
+}
+
+impl From<txn_lock::Error> for Error {
+    fn from(cause: txn_lock::Error) -> Self {
+        Self {
+            kind: ErrorKind::Conflict,
             message: cause.to_string(),
         }
     }

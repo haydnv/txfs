@@ -24,6 +24,7 @@ stream = ["freqfs/stream"]
 freqfs = { path = "../freqfs" }
 futures = "0.3"
 get-size = "0.1"
+hr-id = { path = "../hr-id" }
 log = { version = "0.4", features = ["release_max_level_info"], optional = true }
 safecast = { path = "../safecast" }
 txn_lock = { path = "../txn_lock" }
@@ -31,4 +32,4 @@ txn_lock = { path = "../txn_lock" }
 [dev-dependencies]
 destream = { path = "../destream" }
 rand = "0.8"
-tokio = { version = "1.25", features = ["macros"] }
+tokio = { version = "1.26", features = ["macros"] }

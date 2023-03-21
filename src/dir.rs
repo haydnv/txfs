@@ -7,6 +7,7 @@ use freqfs::{DirLock, FileLoad, FileSave, Name};
 use futures::future::{self, try_join_all, Future, TryFutureExt};
 use futures::stream::{self, FuturesUnordered, Stream, StreamExt};
 use get_size::GetSize;
+use hr_id::Id;
 use safecast::AsType;
 use txn_lock::map::{
     Entry as TxnMapEntry, Iter, TxnMapLock, TxnMapValueReadGuard, TxnMapValueReadGuardMap,
@@ -15,8 +16,8 @@ use txn_lock::map::{
 use super::file::*;
 use super::{Error, Result};
 
-/// The name of an entry in a [`Dir`], used to avoid unnecessary [`String`] allocations
-pub type Key = txn_lock::map::Key<String>;
+/// The name of an entry in a [`Dir`], used to avoid unnecessary allocations
+pub type Key = txn_lock::map::Key<Id>;
 
 /// The name of the directory where un-committed file versions are cached
 pub const VERSIONS: &str = ".txfs";
@@ -65,7 +66,7 @@ impl<TxnId, FE> fmt::Debug for DirEntry<TxnId, FE> {
 pub struct Dir<TxnId, FE> {
     canon: DirLock<FE>,
     versions: DirLock<FE>,
-    entries: TxnMapLock<TxnId, String, DirEntry<TxnId, FE>>,
+    entries: TxnMapLock<TxnId, Id, DirEntry<TxnId, FE>>,
 }
 
 impl<TxnId, FE> Clone for Dir<TxnId, FE> {
@@ -144,9 +145,11 @@ where
                     let mut contents = HashMap::new();
 
                     for (name, entry) in canon.try_read()?.iter() {
-                        if name.starts_with('.') {
+                        let name: Id = if name.starts_with('.') {
                             continue;
-                        }
+                        } else {
+                            name.parse()?
+                        };
 
                         let entry = match entry.clone() {
                             freqfs::DirEntry::Dir(dir) => {
@@ -160,7 +163,7 @@ where
                                 #[cfg(feature = "log")]
                                 log::trace!("load file {}: {:?}", name, file);
 
-                                let file_versions = versions.create_dir(name.clone())?;
+                                let file_versions = versions.create_dir(name.clone().into())?;
 
                                 #[cfg(feature = "log")]
                                 log::trace!("created versions dir for file {}: {:?}", name, file);
@@ -171,7 +174,7 @@ where
                             }
                         };
 
-                        contents.insert(name.clone(), entry);
+                        contents.insert(name, entry);
                     }
 
                     contents
@@ -189,7 +192,7 @@ where
     }
 
     /// Return `true` if this [`Dir`] has an entry at the given `name` at `txn_id`.
-    pub async fn contains(&self, txn_id: TxnId, name: &str) -> Result<bool> {
+    pub async fn contains(&self, txn_id: TxnId, name: &Id) -> Result<bool> {
         self.entries
             .contains_key(txn_id, name)
             .map_err(Error::from)
@@ -197,7 +200,7 @@ where
     }
 
     /// Create a new [`Dir`] with the given `name` at `txn_id`.
-    pub async fn create_dir(&self, txn_id: TxnId, name: String) -> Result<Self> {
+    pub async fn create_dir(&self, txn_id: TxnId, name: Id) -> Result<Self> {
         let entry = match self.entries.entry(txn_id, name.clone()).await? {
             TxnMapEntry::Occupied(_) => {
                 return Err(io::Error::new(
@@ -211,7 +214,7 @@ where
 
         let mut canon = self.canon.write().await;
 
-        let sub_dir = canon.get_or_create_dir(name.clone())?;
+        let sub_dir = canon.get_or_create_dir(name.into())?;
         let sub_dir = Self::load(txn_id, sub_dir).await?;
 
         entry.insert(DirEntry::Dir(sub_dir.clone()));
@@ -220,8 +223,8 @@ where
     }
 
     /// Delete the entry at `name` at `txn_id` and return `true` if it was present.
-    pub async fn delete(&self, txn_id: TxnId, name: String) -> Result<bool> {
-        if let Some(entry) = self.entries.remove(txn_id, name.as_str()).await? {
+    pub async fn delete(&self, txn_id: TxnId, name: Id) -> Result<bool> {
+        if let Some(entry) = self.entries.remove(txn_id, &name).await? {
             if let DirEntry::Dir(dir) = &*entry {
                 dir.clone().truncate(txn_id).await?;
             }
@@ -266,7 +269,7 @@ where
     }
 
     /// Construct an iterator over the contents of this [`Dir`] at `txn_id`.
-    pub async fn iter(&self, txn_id: TxnId) -> Result<Iter<TxnId, String, DirEntry<TxnId, FE>>> {
+    pub async fn iter(&self, txn_id: TxnId) -> Result<Iter<TxnId, Id, DirEntry<TxnId, FE>>> {
         self.entries.iter(txn_id).map_err(Error::from).await
     }
 
@@ -274,8 +277,8 @@ where
     pub async fn get_dir(
         &self,
         txn_id: TxnId,
-        name: &str,
-    ) -> Result<Option<TxnMapValueReadGuardMap<String, Self>>> {
+        name: &Id,
+    ) -> Result<Option<TxnMapValueReadGuardMap<Id, Self>>> {
         if let Some(entry) = self.entries.get(txn_id, name).map_err(Error::from).await? {
             expect_dir(entry).map(Some)
         } else {
@@ -287,8 +290,8 @@ where
     pub fn try_get_dir(
         &self,
         txn_id: TxnId,
-        name: &str,
-    ) -> Result<Option<TxnMapValueReadGuardMap<String, Self>>> {
+        name: &Id,
+    ) -> Result<Option<TxnMapValueReadGuardMap<Id, Self>>> {
         if let Some(entry) = self.entries.try_get(txn_id, name).map_err(Error::from)? {
             expect_dir(entry).map(Some)
         } else {
@@ -326,7 +329,7 @@ where
     pub async fn create_file<F>(
         &self,
         txn_id: TxnId,
-        name: String,
+        name: Id,
         contents: F,
     ) -> Result<File<TxnId, FE>>
     where
@@ -347,7 +350,7 @@ where
 
         let versions = {
             let mut versions = self.versions.write().await;
-            versions.get_or_create_dir(name.clone())?
+            versions.get_or_create_dir(name.clone().into())?
         };
 
         let file = File::create(txn_id, name, self.canon.clone(), versions, contents).await?;
@@ -361,8 +364,8 @@ where
     pub async fn get_file(
         &self,
         txn_id: TxnId,
-        name: &str,
-    ) -> Result<Option<TxnMapValueReadGuardMap<String, File<TxnId, FE>>>> {
+        name: &Id,
+    ) -> Result<Option<TxnMapValueReadGuardMap<Id, File<TxnId, FE>>>> {
         if let Some(entry) = self.entries.get(txn_id, name).map_err(Error::from).await? {
             expect_file(entry).map(Some)
         } else {
@@ -374,8 +377,8 @@ where
     pub fn try_get_file(
         &self,
         txn_id: TxnId,
-        name: &str,
-    ) -> Result<Option<TxnMapValueReadGuardMap<String, File<TxnId, FE>>>> {
+        name: &Id,
+    ) -> Result<Option<TxnMapValueReadGuardMap<Id, File<TxnId, FE>>>> {
         if let Some(entry) = self.entries.try_get(txn_id, name).map_err(Error::from)? {
             expect_file(entry).map(Some)
         } else {
@@ -388,7 +391,7 @@ where
     pub async fn read_file<F>(
         &self,
         txn_id: TxnId,
-        name: &str,
+        name: &Id,
     ) -> Result<FileVersionRead<TxnId, FE, F>>
     where
         F: FileLoad,
@@ -406,7 +409,7 @@ where
     pub async fn write_file<F>(
         &self,
         txn_id: TxnId,
-        name: &str,
+        name: &Id,
     ) -> Result<FileVersionWrite<TxnId, FE, F>>
     where
         F: FileLoad + GetSize + Clone,
@@ -460,13 +463,13 @@ where
 
                 for (name, entry) in deltas {
                     if entry.is_none() {
-                        assert!(!contents.contains_key(&**name));
+                        assert!(!contents.contains_key(&*name));
 
-                        if let Some(entry) = canon.get(&**name) {
+                        if let Some(entry) = canon.get(&*name) {
                             needs_sync = needs_sync || entry.is_file();
                         }
 
-                        canon.delete(&**name).await;
+                        canon.delete(&*name).await;
                     }
                 }
             };
@@ -585,8 +588,8 @@ impl<TxnId, FE> fmt::Debug for Dir<TxnId, FE> {
 
 #[inline]
 fn expect_dir<TxnId, FE>(
-    entry: TxnMapValueReadGuard<String, DirEntry<TxnId, FE>>,
-) -> Result<TxnMapValueReadGuardMap<String, Dir<TxnId, FE>>> {
+    entry: TxnMapValueReadGuard<Id, DirEntry<TxnId, FE>>,
+) -> Result<TxnMapValueReadGuardMap<Id, Dir<TxnId, FE>>> {
     entry.try_map(|entry| match entry {
         DirEntry::Dir(dir) => Ok(dir.clone()),
         DirEntry::File(file) => Err(io::Error::new(
@@ -599,8 +602,8 @@ fn expect_dir<TxnId, FE>(
 
 #[inline]
 fn expect_file<TxnId, FE>(
-    entry: TxnMapValueReadGuard<String, DirEntry<TxnId, FE>>,
-) -> Result<TxnMapValueReadGuardMap<String, File<TxnId, FE>>> {
+    entry: TxnMapValueReadGuard<Id, DirEntry<TxnId, FE>>,
+) -> Result<TxnMapValueReadGuardMap<Id, File<TxnId, FE>>> {
     entry.try_map(|entry| match entry {
         DirEntry::Dir(dir) => {
             Err(io::Error::new(io::ErrorKind::InvalidData, format!("not a file: {:?}", dir)).into())
