@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use destream::en;
 use freqfs::{Cache, DirLock};
+use hr_id::Id;
 use rand::Rng;
 use safecast::as_type;
 use tokio::fs;
@@ -80,13 +81,17 @@ async fn run_example(cache: DirLock<File>) -> Result<(), txfs::Error> {
     let second_txn = TxnId(2);
     let third_txn = TxnId(3);
 
-    let root = Dir::load(first_txn, cache).await?;
+    let root = Dir::load(first_txn, cache, true).await?;
+
+    let file_one: Id = "file-one".parse()?;
+    let file_two: Id = "file-two".parse()?;
+    let subdir_name: Id = "subdir".parse()?;
 
     // just holding a reference to a file doesn't block any transactional I/O
     let file = root
         .create_file(
             first_txn,
-            "file one".into(),
+            file_one.clone(),
             String::from("file one contents"),
         )
         .await?;
@@ -103,21 +108,21 @@ async fn run_example(cache: DirLock<File>) -> Result<(), txfs::Error> {
     }
 
     // but a write in the past will block a read in the future
-    assert!(root.try_get_file(second_txn, "file one").is_err());
+    assert!(root.try_get_file(second_txn, &file_one).is_err());
 
     // committing a Dir with recursive=true commits all its children
     root.commit(first_txn, true).await;
 
-    let subdir = root.create_dir(second_txn, "subdir".into()).await?;
+    let subdir = root.create_dir(second_txn, subdir_name.clone()).await?;
 
     subdir
-        .create_file(second_txn, "file two".into(), vec![2, 3, 4])
+        .create_file(second_txn, file_two.clone(), vec![2, 3, 4])
         .await?;
 
     root.commit(second_txn, true).await;
 
     // deleting a directory will delete all its children, recursively
-    root.delete(third_txn, "subdir".into()).await?;
+    root.delete(third_txn, subdir_name.clone()).await?;
 
     // accessing "subdir" after this can cause the filesystem to get out of sync with the cache!
     root.commit(third_txn, true).await;
@@ -128,10 +133,10 @@ async fn run_example(cache: DirLock<File>) -> Result<(), txfs::Error> {
     let fourth_txn = TxnId(4);
 
     // anything that was deleted is now safe to re-create
-    let subdir = root.create_dir(fourth_txn, "subdir".to_string()).await?;
+    let subdir = root.create_dir(fourth_txn, subdir_name).await?;
 
     let file = subdir
-        .create_file(fourth_txn, "file two".into(), vec![3, 4, 5])
+        .create_file(fourth_txn, file_two, vec![3, 4, 5])
         .await?;
 
     root.commit(fourth_txn, true).await;

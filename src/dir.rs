@@ -79,10 +79,11 @@ impl<TxnId, FE> Clone for Dir<TxnId, FE> {
     }
 }
 
-impl<TxnId, FE> Dir<TxnId, FE> {
+impl<TxnId, FE> Dir<TxnId, FE> where FE: Send + Sync {
     /// Destructure this [`Dir`] into its underlying [`DirLock`].
     /// The caller of this method must implement transactional state management explicitly.
     pub fn into_inner(self) -> DirLock<FE> {
+        debug_assert!(self.canon.try_read().expect("canon").contains(VERSIONS));
         self.canon
     }
 }
@@ -118,9 +119,12 @@ where
     FE: Clone + Send + Sync + 'static,
 {
     /// Load a transactional [`Dir`] from a [`freqfs::DirLock`].
+    ///
+    /// If `persist` is `false`, all un-committed file versions will be deleted.
     pub fn load(
         txn_id: TxnId,
         canon: DirLock<FE>,
+        persist: bool,
     ) -> Pin<Box<dyn Future<Output = Result<Self>> + Send>> {
         #[cfg(feature = "log")]
         log::debug!("load transactional dir from {:?}", canon);
@@ -140,12 +144,23 @@ where
                     log::trace!("lock version dir for writing");
 
                     let mut versions = versions.write().await;
-                    versions.truncate();
+
+                    if !persist {
+                        #[cfg(feature = "logging")]
+                        log::trace!("truncating {} past versions...", versions.len());
+
+                        versions.truncate();
+                    } else {
+                        #[cfg(feature = "logging")]
+                        log::trace!("found {} past versions", versions.len());
+                    }
 
                     let mut contents = HashMap::new();
 
                     for (name, entry) in canon.try_read()?.iter() {
                         let name: Id = if name.starts_with('.') {
+                            #[cfg(feature = "logging")]
+                            log::trace!("skipping hidden dir entry {name}");
                             continue;
                         } else {
                             name.parse()?
@@ -155,7 +170,9 @@ where
                             freqfs::DirEntry::Dir(dir) => {
                                 #[cfg(feature = "log")]
                                 log::trace!("load sub-dir {}: {:?}", name, dir);
-                                Self::load(txn_id, dir).map_ok(DirEntry::Dir).await?
+                                Self::load(txn_id, dir, persist)
+                                    .map_ok(DirEntry::Dir)
+                                    .await?
                             }
                             freqfs::DirEntry::File(file) => {
                                 debug_assert!(file.path().exists());
@@ -163,14 +180,21 @@ where
                                 #[cfg(feature = "log")]
                                 log::trace!("load file {}: {:?}", name, file);
 
-                                let file_versions = versions.create_dir(name.clone().into())?;
+                                let file_versions =
+                                    versions.get_or_create_dir(name.clone().into())?;
 
                                 #[cfg(feature = "log")]
                                 log::trace!("created versions dir for file {}: {:?}", name, file);
 
-                                File::load(txn_id, name.clone(), canon.clone(), file_versions)
-                                    .map_ok(DirEntry::File)
-                                    .await?
+                                File::load(
+                                    txn_id,
+                                    name.clone(),
+                                    canon.clone(),
+                                    file_versions,
+                                    persist,
+                                )
+                                .map_ok(DirEntry::File)
+                                .await?
                             }
                         };
 
@@ -215,7 +239,7 @@ where
         let mut canon = self.canon.write().await;
 
         let sub_dir = canon.get_or_create_dir(name.into())?;
-        let sub_dir = Self::load(txn_id, sub_dir).await?;
+        let sub_dir = Self::load(txn_id, sub_dir, true).await?;
 
         entry.insert(DirEntry::Dir(sub_dir.clone()));
 
@@ -434,9 +458,6 @@ where
         txn_id: TxnId,
         recursive: bool,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-        #[cfg(feature = "logging")]
-        log::debug!("commit Dir at {:?}...", txn_id);
-
         Box::pin(async move {
             let (contents, deltas) = self.entries.read_and_commit(txn_id).await;
 
