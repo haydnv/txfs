@@ -79,7 +79,10 @@ impl<TxnId, FE> Clone for Dir<TxnId, FE> {
     }
 }
 
-impl<TxnId, FE> Dir<TxnId, FE> where FE: Send + Sync {
+impl<TxnId, FE> Dir<TxnId, FE>
+where
+    FE: Send + Sync,
+{
     /// Destructure this [`Dir`] into its underlying [`DirLock`].
     /// The caller of this method must implement transactional state management explicitly.
     pub fn into_inner(self) -> DirLock<FE> {
@@ -118,13 +121,10 @@ where
     TxnId: Name + Hash + Ord + Copy + fmt::Display + fmt::Debug + Send + Sync + 'static,
     FE: Clone + Send + Sync + 'static,
 {
-    /// Load a transactional [`Dir`] from a [`freqfs::DirLock`].
-    ///
-    /// If `persist` is `false`, all un-committed file versions will be deleted.
+    /// Load a transactional [`Dir`] from a [`DirLock`].
     pub fn load(
         txn_id: TxnId,
         canon: DirLock<FE>,
-        persist: bool,
     ) -> Pin<Box<dyn Future<Output = Result<Self>> + Send>> {
         #[cfg(feature = "log")]
         log::debug!("load transactional dir from {:?}", canon);
@@ -145,15 +145,9 @@ where
 
                     let mut versions = versions.write().await;
 
-                    if !persist {
-                        #[cfg(feature = "logging")]
-                        log::trace!("truncating {} past versions...", versions.len());
-
-                        versions.truncate();
-                    } else {
-                        #[cfg(feature = "logging")]
-                        log::trace!("found {} past versions", versions.len());
-                    }
+                    #[cfg(feature = "logging")]
+                    log::trace!("truncating {} past versions...", versions.len());
+                    versions.truncate();
 
                     let mut contents = HashMap::new();
 
@@ -170,9 +164,7 @@ where
                             freqfs::DirEntry::Dir(dir) => {
                                 #[cfg(feature = "log")]
                                 log::trace!("load sub-dir {}: {:?}", name, dir);
-                                Self::load(txn_id, dir, persist)
-                                    .map_ok(DirEntry::Dir)
-                                    .await?
+                                Self::load(txn_id, dir).map_ok(DirEntry::Dir).await?
                             }
                             freqfs::DirEntry::File(file) => {
                                 debug_assert!(file.path().exists());
@@ -186,15 +178,9 @@ where
                                 #[cfg(feature = "log")]
                                 log::trace!("created versions dir for file {}: {:?}", name, file);
 
-                                File::load(
-                                    txn_id,
-                                    name.clone(),
-                                    canon.clone(),
-                                    file_versions,
-                                    persist,
-                                )
-                                .map_ok(DirEntry::File)
-                                .await?
+                                File::load(txn_id, name.clone(), canon.clone(), file_versions)
+                                    .map_ok(DirEntry::File)
+                                    .await?
                             }
                         };
 
@@ -239,7 +225,7 @@ where
         let mut canon = self.canon.write().await;
 
         let sub_dir = canon.get_or_create_dir(name.into())?;
-        let sub_dir = Self::load(txn_id, sub_dir, true).await?;
+        let sub_dir = Self::load(txn_id, sub_dir).await?;
 
         entry.insert(DirEntry::Dir(sub_dir.clone()));
 

@@ -105,7 +105,6 @@ where
         name: Id,
         parent: DirLock<FE>,
         versions: DirLock<FE>,
-        persist: bool,
     ) -> Result<Self> {
         #[cfg(feature = "logging")]
         log::debug!("load file {} into the transactional filesystem cache", name);
@@ -142,15 +141,9 @@ where
 
             let mut versions = versions.write().await;
 
-            if !persist {
-                #[cfg(feature = "logging")]
-                log::trace!("truncate obsolete versions of {name}...");
-
-                versions.truncate();
-            } else {
-                #[cfg(feature = "logging")]
-                log::trace!("{name} has {} versions prior to {txn_id}", versions.len());
-            }
+            #[cfg(feature = "logging")]
+            log::trace!("truncate obsolete versions of {name}...");
+            versions.truncate();
 
             versions.copy_file_from(txn_id.to_string(), &canon).await?;
 
