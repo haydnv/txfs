@@ -81,7 +81,7 @@ async fn run_example(cache: DirLock<File>) -> Result<(), txfs::Error> {
     let second_txn = TxnId(2);
     let third_txn = TxnId(3);
 
-    let root = Dir::load(first_txn, cache, true).await?;
+    let root = Dir::load(first_txn, cache).await?;
 
     let file_one: Id = "file-one".parse()?;
     let file_two: Id = "file-two".parse()?;
