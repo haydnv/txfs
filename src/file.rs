@@ -84,7 +84,9 @@ where
             .try_read()
             .expect("version dir")
             .path()
-            .ends_with(&name));
+            .to_str()
+            .expect("path")
+            .ends_with(name.as_str()));
 
         {
             let size = version.get_size();
@@ -113,7 +115,9 @@ where
             .try_read()
             .expect("version dir")
             .path()
-            .ends_with(&name));
+            .to_str()
+            .expect("path")
+            .ends_with(name.as_str()));
 
         {
             let parent = parent.try_read().map_err(|cause| {
