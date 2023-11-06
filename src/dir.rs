@@ -172,8 +172,7 @@ where
                                 #[cfg(feature = "log")]
                                 log::trace!("load file {}: {:?}", name, file);
 
-                                let file_versions =
-                                    versions.get_or_create_dir(name.clone().into())?;
+                                let file_versions = versions.get_or_create_dir(name.to_string())?;
 
                                 #[cfg(feature = "log")]
                                 log::trace!("created versions dir for file {}: {:?}", name, file);
@@ -224,7 +223,7 @@ where
 
         let mut canon = self.canon.write().await;
 
-        let sub_dir = canon.get_or_create_dir(name.into())?;
+        let sub_dir = canon.get_or_create_dir(name.to_string())?;
         let sub_dir = Self::load(txn_id, sub_dir).await?;
 
         entry.insert(DirEntry::Dir(sub_dir.clone()));
@@ -360,7 +359,7 @@ where
 
         let versions = {
             let mut versions = self.versions.write().await;
-            versions.get_or_create_dir(name.clone().into())?
+            versions.get_or_create_dir(name.to_string())?
         };
 
         let file = File::create(txn_id, name, self.canon.clone(), versions, contents).await?;
