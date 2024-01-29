@@ -449,7 +449,7 @@ where
             if recursive {
                 let commits = FuturesUnordered::new();
 
-                for (_name, entry) in &*contents {
+                for (_name, entry) in &contents {
                     let entry = DirEntry::clone(&*entry);
 
                     commits.push(async move {
@@ -499,7 +499,7 @@ where
             if recursive {
                 let rollbacks = FuturesUnordered::new();
 
-                for (_name, entry) in &*contents {
+                for (_name, entry) in contents {
                     let entry = DirEntry::clone(&*entry);
 
                     rollbacks.push(async move {

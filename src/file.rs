@@ -248,7 +248,7 @@ where
     {
         let last_modified = self.last_modified.read_and_commit(txn_id).await;
 
-        if &**last_modified == &txn_id {
+        if &*last_modified == &txn_id {
             let versions = self.versions.read().await;
             if let DirEntry::File(file) = versions.get(&txn_id).expect("version") {
                 let mut parent = self.parent.write().await;
@@ -271,7 +271,7 @@ where
     pub async fn rollback(&self, txn_id: TxnId) {
         let last_modified = self.last_modified.read_and_rollback(txn_id).await;
 
-        if &**last_modified == &txn_id {
+        if &*last_modified == &txn_id {
             let mut versions = self.versions.write().await;
             versions.delete(&txn_id).await;
         }
