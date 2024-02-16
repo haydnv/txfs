@@ -147,7 +147,7 @@ where
 
             #[cfg(feature = "logging")]
             log::trace!("truncate obsolete versions of {name}...");
-            versions.truncate();
+            versions.truncate().await;
 
             versions.copy_file_from(txn_id.to_string(), &canon).await?;
 

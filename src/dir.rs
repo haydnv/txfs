@@ -147,7 +147,7 @@ where
 
                     #[cfg(feature = "logging")]
                     log::trace!("truncating {} past versions...", versions.len());
-                    versions.truncate();
+                    versions.truncate().await;
 
                     let mut contents = HashMap::new();
 
@@ -546,7 +546,7 @@ where
                 }
 
                 for name in to_delete {
-                    versions.delete(name.as_str());
+                    versions.delete(name.as_str()).await;
                 }
 
                 versions.is_empty()
@@ -571,11 +571,11 @@ where
             }
 
             for name in to_delete {
-                canon.delete(&name);
+                canon.delete(&name).await;
             }
 
             if delete_versions {
-                canon.delete(VERSIONS);
+                canon.delete(VERSIONS).await;
                 sync_canon = true;
             }
         }
