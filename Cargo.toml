@@ -21,7 +21,7 @@ logging = ["log", "freqfs/logging", "txn_lock/logging"]
 stream = ["freqfs/stream"]
 
 [dependencies]
-freqfs = { version = "0.9", features = ["id"] }
+freqfs = { path = "../freqfs", features = ["id"] }
 futures = "0.3"
 get-size = "0.1"
 hr-id = "0.5"

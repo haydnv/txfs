@@ -121,7 +121,7 @@ impl<TxnId: Copy + Hash + Eq + Ord + fmt::Debug, FE> Dir<TxnId, FE> {
 impl<TxnId, FE> Dir<TxnId, FE>
 where
     TxnId: Name + Hash + Ord + Copy + fmt::Display + fmt::Debug + Send + Sync + 'static,
-    FE: Clone + Send + Sync + 'static,
+    FE: for<'a> FileSave<'a> + Clone,
 {
     /// Load a transactional [`Dir`] from a [`DirLock`].
     pub fn load(
@@ -150,6 +150,7 @@ where
                     #[cfg(feature = "logging")]
                     log::trace!("truncating {} past versions...", versions.len());
                     versions.truncate().await;
+                    versions.sync().await?;
 
                     let mut contents = HashMap::new();
 
@@ -202,14 +203,6 @@ where
         })
     }
 
-    /// Return `true` if this [`Dir`] has an entry at the given `name` at `txn_id`.
-    pub async fn contains(&self, txn_id: TxnId, name: &Id) -> Result<bool> {
-        self.entries
-            .contains_key(txn_id, name)
-            .map_err(Error::from)
-            .await
-    }
-
     /// Create a new [`Dir`] with the given `name` at `txn_id`.
     pub async fn create_dir(&self, txn_id: TxnId, name: Id) -> Result<Self> {
         let entry = match self.entries.entry(txn_id, name.clone()).await? {
@@ -231,6 +224,20 @@ where
         entry.insert(DirEntry::Dir(sub_dir.clone()));
 
         Ok(sub_dir)
+    }
+}
+
+impl<TxnId, FE> Dir<TxnId, FE>
+where
+    TxnId: Name + Hash + Ord + Copy + fmt::Display + fmt::Debug + Send + Sync + 'static,
+    FE: Clone + Send + Sync + 'static,
+{
+    /// Return `true` if this [`Dir`] has an entry at the given `name` at `txn_id`.
+    pub async fn contains(&self, txn_id: TxnId, name: &Id) -> Result<bool> {
+        self.entries
+            .contains_key(txn_id, name)
+            .map_err(Error::from)
+            .await
     }
 
     /// Delete the entry at `name` at `txn_id` and return `true` if it was present.
