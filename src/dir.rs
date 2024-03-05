@@ -38,13 +38,15 @@ impl<TxnId, FE> Clone for DirEntry<TxnId, FE> {
 }
 
 impl<TxnId, FE> DirEntry<TxnId, FE> {
-    fn is_dir(&self) -> bool {
+    /// Return `true` if this [`DirEntry`] is itself a [`Dir`].
+    pub fn is_dir(&self) -> bool {
         match self {
             Self::Dir(_) => true,
             _ => false,
         }
     }
 
+    /// Return `true` if this [`DirEntry`] is a [`File`].
     fn is_file(&self) -> bool {
         match self {
             Self::File(_) => true,
