@@ -10,86 +10,46 @@ pub use hr_id::Id;
 mod dir;
 mod file;
 
-/// The type of error encountered during a transactional filesystem operation
-pub enum ErrorKind {
-    NotFound,
-    Conflict,
-    IO,
-}
-
-impl fmt::Debug for ErrorKind {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_str(match self {
-            Self::NotFound => "not found",
-            Self::Conflict => "conflict",
-            Self::IO => "file IO error",
-        })
-    }
-}
-
 /// An error encountered during a transactional filesystem operation
-pub struct Error {
-    kind: ErrorKind,
-    message: String,
-}
-
-impl Error {
-    /// Construct an [`Error`].
-    pub fn new<I: fmt::Display>(kind: ErrorKind, message: I) -> Self {
-        Self {
-            kind,
-            message: message.to_string(),
-        }
-    }
-
-    /// Destructure this error information.
-    pub fn into_inner(self) -> (ErrorKind, String) {
-        (self.kind, self.message)
-    }
+pub enum Error {
+    Conflict(txn_lock::Error),
+    IO(io::Error),
+    NotFound(String),
+    Parse(hr_id::ParseError),
 }
 
 impl From<hr_id::ParseError> for Error {
     fn from(cause: hr_id::ParseError) -> Self {
-        Self {
-            kind: ErrorKind::IO,
-            message: cause.to_string(),
-        }
+        Self::Parse(cause)
     }
 }
 
 impl From<io::Error> for Error {
     fn from(cause: io::Error) -> Self {
-        let kind = match cause.kind() {
-            io::ErrorKind::NotFound => ErrorKind::NotFound,
-            io::ErrorKind::WouldBlock => ErrorKind::Conflict,
-            _ => ErrorKind::IO,
-        };
-
-        Self {
-            kind,
-            message: cause.to_string(),
-        }
+        Self::IO(cause)
     }
 }
 
 impl From<txn_lock::Error> for Error {
     fn from(cause: txn_lock::Error) -> Self {
-        Self {
-            kind: ErrorKind::Conflict,
-            message: cause.to_string(),
-        }
+        Self::Conflict(cause)
     }
 }
 
 impl fmt::Debug for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}: {}", self.kind, self.message)
+        match self {
+            Self::Conflict(cause) => cause.fmt(f),
+            Self::IO(cause) => cause.fmt(f),
+            Self::NotFound(locator) => write!(f, "not found: {locator}"),
+            Self::Parse(cause) => cause.fmt(f),
+        }
     }
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}: {}", self.kind, self.message)
+        fmt::Debug::fmt(self, f)
     }
 }
 

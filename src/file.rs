@@ -9,7 +9,7 @@ use hr_id::Id;
 use safecast::AsType;
 use txn_lock::scalar::{TxnLock, TxnLockReadGuard, TxnLockWriteGuard};
 
-use super::{Error, ErrorKind, Result};
+use super::{Error, Result};
 
 /// A read guard on a version of a transactional [`File`]
 pub struct FileVersionRead<TxnId, FE, F> {
@@ -120,15 +120,7 @@ where
             .ends_with(name.as_str()));
 
         {
-            let parent = parent.try_read().map_err(|cause| {
-                Error::new(
-                    ErrorKind::Conflict,
-                    format!(
-                        "cannot load file {} since its parent directory is locked for writing: {}",
-                        name, cause
-                    ),
-                )
-            })?;
+            let parent = parent.try_read().map_err(Error::from)?;
 
             let canon = parent.get_file(&name).ok_or_else(|| {
                 io::Error::new(
