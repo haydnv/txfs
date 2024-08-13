@@ -170,7 +170,11 @@ where
                                 Self::load(txn_id, dir).map_ok(DirEntry::Dir).await?
                             }
                             freqfs::DirEntry::File(file) => {
-                                debug_assert!(file.path().exists());
+                                #[cfg(debug_assertions)]
+                                if !file.path().exists() {
+                                    #[cfg(feature = "log")]
+                                    log::warn!("there is no file at {}", file.path().display());
+                                }
 
                                 #[cfg(feature = "log")]
                                 log::trace!("load file {}: {:?}", name, file);
@@ -205,6 +209,9 @@ where
 
     /// Create a new [`Dir`] with the given `name` at `txn_id`.
     pub async fn create_dir(&self, txn_id: TxnId, name: Id) -> Result<Self> {
+        #[cfg(feature = "logging")]
+        log::trace!("Dir::create_dir {name}");
+
         let entry = match self.entries.entry(txn_id, name.clone()).await? {
             TxnMapEntry::Occupied(_) => {
                 return Err(io::Error::new(
@@ -354,6 +361,9 @@ where
         FE: AsType<F>,
         F: GetSize + Clone,
     {
+        #[cfg(feature = "logging")]
+        log::trace!("Dir::create_file {name}");
+
         // this write permit ensures that there is no other pending entry with this name
         let entry = match self.entries.entry(txn_id, name.clone()).await? {
             TxnMapEntry::Occupied(_) => {
@@ -453,12 +463,18 @@ where
         recursive: bool,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
+            #[cfg(feature = "logging")]
+            log::trace!("Dir::commit, recursive={recursive}");
+
             let (contents, deltas) = self.entries.read_and_commit(txn_id).await;
 
             if recursive {
                 let commits = FuturesUnordered::new();
 
                 for (_name, entry) in &contents {
+                    #[cfg(feature = "logging")]
+                    log::trace!("Dir::commit {}: {:?}", _name, entry);
+
                     let entry = DirEntry::clone(&*entry);
 
                     commits.push(async move {
