@@ -169,20 +169,20 @@ where
                                 log::trace!("load sub-dir {}: {:?}", name, dir);
                                 Self::load(txn_id, dir).map_ok(DirEntry::Dir).await?
                             }
-                            freqfs::DirEntry::File(file) => {
+                            freqfs::DirEntry::File(_file) => {
                                 #[cfg(debug_assertions)]
-                                if !file.path().exists() {
+                                if !_file.path().exists() {
                                     #[cfg(feature = "log")]
-                                    log::warn!("there is no file at {}", file.path().display());
+                                    log::warn!("there is no file at {}", _file.path().display());
                                 }
 
                                 #[cfg(feature = "log")]
-                                log::trace!("load file {}: {:?}", name, file);
+                                log::trace!("load file {}: {:?}", name, _file);
 
                                 let file_versions = versions.get_or_create_dir(name.to_string())?;
 
                                 #[cfg(feature = "log")]
-                                log::trace!("created versions dir for file {}: {:?}", name, file);
+                                log::trace!("created versions dir for file {}: {:?}", name, _file);
 
                                 File::load(txn_id, name.clone(), canon.clone(), file_versions)
                                     .map_ok(DirEntry::File)
