@@ -332,8 +332,8 @@ where
             let entries = self.entries.clear(txn_id).map_err(Error::from).await?;
 
             let truncates = entries
-                .into_iter()
-                .filter_map(|(_name, entry)| {
+                .into_values()
+                .filter_map(|entry| {
                     if let DirEntry::Dir(dir) = &*entry {
                         Some(dir.clone())
                     } else {
