@@ -175,7 +175,7 @@ mod tests {
         path.push(format!("txfs_test_{}_{}", std::process::id(), unique));
         fs::create_dir(&path).await?;
 
-        let cache = Cache::<Entry>::new(40, None);
+        let cache = Cache::<Entry>::new(1024, None, 0, std::time::Duration::from_secs(3));
         let root = cache.load(path.clone())?;
         let dir = super::Dir::load(Txn(1), root).await?;
 
