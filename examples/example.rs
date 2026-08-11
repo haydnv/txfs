@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::io;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use destream::en;
 use freqfs::{Cache, DirLock};
@@ -154,7 +155,7 @@ async fn main() -> Result<(), txfs::Error> {
     let path = setup_tmp_dir().await?;
 
     // initialize the cache
-    let cache = Cache::new(40, None);
+    let cache = Cache::new(40, None, 0, Duration::from_secs(3));
 
     // load the directory and file paths into memory (not file contents, yet)
     let root = cache.load(path.clone())?;

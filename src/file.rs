@@ -91,7 +91,9 @@ where
         {
             let size = version.get_size();
             let mut versions = versions.write().await;
-            versions.create_file(txn_id.to_string(), version, size)?;
+            versions
+                .create_file(txn_id.to_string(), version, size)
+                .await?;
         }
 
         Ok(Self {
@@ -202,7 +204,9 @@ where
             let version = F::clone(&*canon);
             let size = version.get_size();
 
-            versions.create_file(txn_id.to_string(), version, size)?
+            versions
+                .create_file(txn_id.to_string(), version, size)
+                .await?
         } else if last_modified == txn_id {
             versions.get_file(&*last_modified).expect("version").clone()
         } else {
