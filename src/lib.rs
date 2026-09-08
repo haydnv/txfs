@@ -13,6 +13,7 @@ mod file;
 /// An error encountered during a transactional filesystem operation
 pub enum Error {
     Conflict(txn_lock::Error),
+    Corrupt(String),
     IO(io::Error),
     NotFound(String),
     Parse(hr_id::ParseError),
@@ -40,6 +41,7 @@ impl fmt::Debug for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Self::Conflict(cause) => cause.fmt(f),
+            Self::Corrupt(cause) => write!(f, "corrupt transactional storage: {cause}"),
             Self::IO(cause) => cause.fmt(f),
             Self::NotFound(locator) => write!(f, "not found: {locator}"),
             Self::Parse(cause) => cause.fmt(f),
@@ -62,13 +64,14 @@ pub type Result<T> = std::result::Result<T, Error>;
 mod tests {
     use std::cmp::Ordering;
     use std::fmt;
+    use std::str::FromStr;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use freqfs::Cache;
     use freqfs::Name;
     use get_size::GetSize;
-    use safecast::as_type;
     use safecast::AsType;
+    use safecast::as_type;
     use tokio::fs;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -78,6 +81,14 @@ mod tests {
     impl fmt::Display for Txn {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             self.0.fmt(f)
+        }
+    }
+
+    impl FromStr for Txn {
+        type Err = std::num::ParseIntError;
+
+        fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+            value.parse().map(Self)
         }
     }
 
@@ -177,7 +188,7 @@ mod tests {
 
         let cache = Cache::<Entry>::new(1024, None, 0, std::time::Duration::from_secs(3));
         let root = cache.load(path.clone())?;
-        let dir = super::Dir::load(Txn(1), root).await?;
+        let dir = super::Dir::load(root).await?;
 
         let name: super::Id = "file-one".parse()?;
         let file = dir
@@ -194,7 +205,7 @@ mod tests {
             *write = Entry::Bin(vec![9u8, 8]);
         }
 
-        file.commit(Txn(2)).await;
+        file.commit(Txn(2)).await?;
 
         let read = file.read::<Entry>(Txn(3)).await?;
         match &*read {
@@ -203,6 +214,55 @@ mod tests {
 
         let _ = fs::remove_dir_all(&path).await;
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn load_reads_committed_state_without_a_transaction()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut path = std::env::temp_dir();
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        path.push(format!("txfs_load_test_{}_{}", std::process::id(), unique));
+        fs::create_dir(&path).await?;
+        fs::write(path.join("file-one"), [4u8, 5, 6]).await?;
+
+        let cache = Cache::<Entry>::new(1024, None, 0, std::time::Duration::from_secs(3));
+        let root = cache.load(path.clone())?;
+        let dir = super::Dir::<Txn, Entry>::load(root).await?;
+        let name: super::Id = "file-one".parse()?;
+        let file = dir.get_file(Txn(7), &name).await?.expect("committed file");
+        let read = file.read::<Entry>(Txn(7)).await?;
+        match &*read {
+            Entry::Bin(bytes) => assert_eq!(bytes.as_slice(), &[4u8, 5, 6]),
+        }
+
+        fs::remove_dir_all(path).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn load_rejects_pending_state_without_deleting_it()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut path = std::env::temp_dir();
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        path.push(format!(
+            "txfs_pending_test_{}_{}",
+            std::process::id(),
+            unique
+        ));
+        let pending = path.join(super::dir::VERSIONS).join("file-one").join("5");
+        fs::create_dir_all(pending.parent().expect("pending parent")).await?;
+        fs::write(&pending, [9u8]).await?;
+
+        let cache = Cache::<Entry>::new(1024, None, 0, std::time::Duration::from_secs(3));
+        let root = cache.load(path.clone())?;
+        assert!(matches!(
+            super::Dir::<Txn, Entry>::load(root).await,
+            Err(super::Error::Corrupt(_))
+        ));
+        assert_eq!(fs::read(&pending).await?, [9u8]);
+
+        fs::remove_dir_all(path).await?;
         Ok(())
     }
 }

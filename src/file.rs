@@ -1,5 +1,6 @@
 use std::hash::Hash;
 use std::ops::{Deref, DerefMut};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::{fmt, io};
 
@@ -13,7 +14,7 @@ use super::{Error, Result};
 
 /// A read guard on a version of a transactional [`File`]
 pub struct FileVersionRead<TxnId, FE, F> {
-    _modified: TxnLockReadGuard<TxnId>,
+    _modified: TxnLockReadGuard<Option<TxnId>>,
     version: FileReadGuardOwned<FE, F>,
 }
 
@@ -27,7 +28,7 @@ impl<TxnId, FE, F> Deref for FileVersionRead<TxnId, FE, F> {
 
 /// A write guard on a version of a transactional [`File`]
 pub struct FileVersionWrite<TxnId, FE, F> {
-    _modified: TxnLockWriteGuard<TxnId>,
+    _modified: TxnLockWriteGuard<Option<TxnId>>,
     version: FileWriteGuardOwned<FE, F>,
 }
 
@@ -47,7 +48,7 @@ impl<TxnId, FE, F> DerefMut for FileVersionWrite<TxnId, FE, F> {
 
 /// A transactional file
 pub struct File<TxnId, FE> {
-    last_modified: TxnLock<TxnId, TxnId>,
+    last_modified: TxnLock<TxnId, Option<TxnId>>,
     versions: DirLock<FE>,
     parent: DirLock<FE>,
     name: Arc<Id>,
@@ -66,7 +67,7 @@ impl<TxnId, FE> Clone for File<TxnId, FE> {
 
 impl<TxnId, FE> File<TxnId, FE>
 where
-    TxnId: Name + fmt::Display + fmt::Debug + Hash + Ord + Copy,
+    TxnId: fmt::Display + fmt::Debug + Hash + Ord + Copy,
     FE: Clone + Send + Sync,
 {
     pub(super) async fn create<F>(
@@ -80,13 +81,15 @@ where
         FE: AsType<F>,
         F: GetSize,
     {
-        debug_assert!(versions
-            .try_read()
-            .expect("version dir")
-            .path()
-            .to_str()
-            .expect("path")
-            .ends_with(name.as_str()));
+        debug_assert!(
+            versions
+                .try_read()
+                .expect("version dir")
+                .path()
+                .to_str()
+                .expect("path")
+                .ends_with(name.as_str())
+        );
 
         {
             let size = version.get_size();
@@ -97,34 +100,31 @@ where
         }
 
         Ok(Self {
-            last_modified: TxnLock::new(txn_id),
+            last_modified: TxnLock::new(Some(txn_id)),
             versions,
             parent,
             name: Arc::new(name),
         })
     }
 
-    pub(super) async fn load(
-        txn_id: TxnId,
-        name: Id,
-        parent: DirLock<FE>,
-        versions: DirLock<FE>,
-    ) -> Result<Self> {
+    pub(super) async fn load(name: Id, parent: DirLock<FE>, versions: DirLock<FE>) -> Result<Self> {
         #[cfg(feature = "logging")]
         log::debug!("load file {} into the transactional filesystem cache", name);
 
-        debug_assert!(versions
-            .try_read()
-            .expect("version dir")
-            .path()
-            .to_str()
-            .expect("path")
-            .ends_with(name.as_str()));
+        debug_assert!(
+            versions
+                .try_read()
+                .expect("version dir")
+                .path()
+                .to_str()
+                .expect("path")
+                .ends_with(name.as_str())
+        );
 
         {
             let parent = parent.try_read().map_err(Error::from)?;
 
-            let canon = parent.get_file(&name).ok_or_else(|| {
+            let _canon = parent.get_file(&name).ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::NotFound,
                     format!(
@@ -133,24 +133,16 @@ where
                     ),
                 )
             })?;
+        }
 
-            #[cfg(feature = "logging")]
-            log::trace!("acquiring write lock on versions dir for file {name}...");
-
-            let mut versions = versions.write().await;
-
-            #[cfg(feature = "logging")]
-            log::trace!("truncate obsolete versions of {name}...");
-            versions.truncate().await;
-
-            versions.copy_file_from(txn_id.to_string(), canon).await?;
-
-            #[cfg(feature = "logging")]
-            log::trace!("copied canonical version of {:?}", canon);
+        if !versions.read().await.is_empty() {
+            return Err(Error::Corrupt(format!(
+                "unresolved transactional versions for {name}"
+            )));
         }
 
         Ok(Self {
-            last_modified: TxnLock::new(txn_id),
+            last_modified: TxnLock::new(None),
             versions,
             parent,
             name: Arc::new(name),
@@ -160,7 +152,7 @@ where
 
 impl<TxnId, FE> File<TxnId, FE>
 where
-    TxnId: Name + fmt::Display + fmt::Debug + Hash + Ord + Copy,
+    TxnId: fmt::Display + fmt::Debug + Hash + Ord + Copy,
     FE: Send + Sync,
 {
     /// Lock this file for reading at the given `txn_id`.
@@ -170,8 +162,23 @@ where
         FE: AsType<F>,
     {
         let last_modified = self.last_modified.read(txn_id).await?;
-        let versions = self.versions.read().await;
-        let version = versions.read_file_owned(&*last_modified).await?;
+        let staged = {
+            let versions = self.versions.read().await;
+            last_modified
+                .as_ref()
+                .and_then(|version| versions.get_file(&version.to_string()).cloned())
+        };
+        let version = if let Some(staged) = staged {
+            staged.read_owned::<F>().await?
+        } else {
+            let canonical = {
+                let parent = self.parent.read().await;
+                parent.get_file(&*self.name).cloned().ok_or_else(|| {
+                    Error::Corrupt(format!("missing canonical version for {}", self.name))
+                })?
+            };
+            canonical.read_owned::<F>().await?
+        };
 
         Ok(FileVersionRead {
             _modified: last_modified,
@@ -195,20 +202,40 @@ where
         FE: AsType<F>,
     {
         let mut last_modified = self.last_modified.write(txn_id).await?;
-        let mut versions = self.versions.write().await;
-
-        let version = if last_modified < txn_id {
-            let canon = versions.read_file_owned(&*last_modified).await?;
-            *last_modified = txn_id;
-
+        let version = if last_modified
+            .as_ref()
+            .is_none_or(|modified| *modified < txn_id)
+        {
+            let staged = {
+                let versions = self.versions.read().await;
+                last_modified
+                    .as_ref()
+                    .and_then(|version| versions.get_file(&version.to_string()).cloned())
+            };
+            let canon = if let Some(staged) = staged {
+                staged.read_owned::<F>().await?
+            } else {
+                let canonical = {
+                    let parent = self.parent.read().await;
+                    parent.get_file(&*self.name).cloned().ok_or_else(|| {
+                        Error::Corrupt(format!("missing canonical version for {}", self.name))
+                    })?
+                };
+                canonical.read_owned::<F>().await?
+            };
+            *last_modified = Some(txn_id);
             let version = F::clone(&*canon);
             let size = version.get_size();
-
+            let mut versions = self.versions.write().await;
             versions
                 .create_file(txn_id.to_string(), version, size)
                 .await?
-        } else if last_modified == txn_id {
-            versions.get_file(&*last_modified).expect("version").clone()
+        } else if *last_modified == Some(txn_id) {
+            let versions = self.versions.read().await;
+            versions
+                .get_file(&txn_id.to_string())
+                .expect("version")
+                .clone()
         } else {
             return Err(txn_lock::Error::Outdated.into());
         };
@@ -231,62 +258,86 @@ where
 
 impl<TxnId, FE> File<TxnId, FE>
 where
-    TxnId: Name + Hash + Ord + PartialOrd<str> + fmt::Debug + Copy + Send + Sync,
-    FE: FileSave + Send + Sync,
+    TxnId: Hash + Ord + fmt::Display + fmt::Debug + Copy + Send + Sync,
+    FE: FileSave + Clone + Send + Sync,
 {
     /// Commit the state of this file at `txn_id`.
     /// This will un-block any pending future write locks.
     /// If this file was modified at `txn_id`, it will replace the canonical version with
     /// the modified version and sync with the host filesystem.
-    pub async fn commit(&self, txn_id: TxnId)
-    where
-        FE: Clone,
-    {
-        let last_modified = self.last_modified.read_and_commit(txn_id).await;
+    pub async fn commit(&self, txn_id: TxnId) -> Result<()> {
+        let last_modified = self.last_modified.read(txn_id).await?;
 
-        if *last_modified == txn_id {
-            let versions = self.versions.read().await;
-            if let DirEntry::File(file) = versions.get(&txn_id).expect("version") {
-                let mut parent = self.parent.write().await;
-
-                let canon = parent
-                    .copy_file_from(self.name.to_string(), file)
-                    .await
-                    .expect("copy canonical version");
-
-                canon
-                    .sync()
-                    .await
-                    .expect("sync canonical version with the filesystem");
-            } else {
-                unreachable!("transactional file out of sync with filesystem");
-            }
+        if *last_modified == Some(txn_id) {
+            let staged = self
+                .versions
+                .read()
+                .await
+                .get_file(&txn_id.to_string())
+                .cloned()
+                .ok_or_else(|| {
+                    Error::Corrupt(format!(
+                        "missing staged version {txn_id:?} for {}",
+                        self.name
+                    ))
+                })?;
+            let mut parent = self.parent.write().await;
+            let canon = parent
+                .copy_file_from(self.name.to_string(), &staged)
+                .await?;
+            canon.sync().await?;
         }
+        drop(last_modified);
+        self.last_modified.read_and_commit(txn_id).await;
+        Ok(())
     }
 
-    pub async fn rollback(&self, txn_id: TxnId) {
+    pub async fn rollback(&self, txn_id: TxnId) -> Result<()> {
         let last_modified = self.last_modified.read_and_rollback(txn_id).await;
 
-        if *last_modified == txn_id {
+        if *last_modified == Some(txn_id) {
             let mut versions = self.versions.write().await;
-            versions.delete(&txn_id).await;
+            versions.delete(&txn_id.to_string()).await;
+            if let Err(error) = versions.sync().await {
+                if error.kind() != io::ErrorKind::NotFound {
+                    return Err(error.into());
+                }
+            }
         }
+        Ok(())
     }
+}
 
-    pub async fn finalize(&self, txn_id: TxnId) {
+impl<TxnId, FE> File<TxnId, FE>
+where
+    TxnId: Hash + Ord + FromStr + fmt::Display + fmt::Debug + Copy + Send + Sync,
+    FE: FileSave + Clone + Send + Sync,
+{
+    pub async fn finalize(&self, txn_id: TxnId) -> Result<()> {
         if let Some(last_modified) = self.last_modified.read_and_finalize(txn_id) {
             let mut versions = self.versions.write().await;
-
-            let to_delete = versions
-                .names()
-                .filter(|version_id| *last_modified >= *version_id.as_str())
-                .cloned()
-                .collect::<Vec<_>>();
-
+            let mut to_delete = Vec::new();
+            for version_id in versions.names() {
+                let parsed = version_id.parse::<TxnId>().map_err(|_| {
+                    Error::Corrupt(format!("invalid staged transaction version {version_id}"))
+                })?;
+                if last_modified
+                    .as_ref()
+                    .is_some_and(|modified| modified >= parsed)
+                {
+                    to_delete.push(version_id.clone());
+                }
+            }
             for version_id in to_delete {
                 versions.delete(&version_id).await;
             }
+            if let Err(error) = versions.sync().await {
+                if error.kind() != io::ErrorKind::NotFound {
+                    return Err(error.into());
+                }
+            }
         }
+        Ok(())
     }
 }
 

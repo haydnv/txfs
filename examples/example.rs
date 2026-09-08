@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::io;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::time::Duration;
 
 use destream::en;
@@ -47,6 +48,14 @@ impl fmt::Display for Txn {
     }
 }
 
+impl FromStr for Txn {
+    type Err = std::num::ParseIntError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value.parse().map(Self)
+    }
+}
+
 #[derive(Clone)]
 enum File {
     Bin(Vec<u8>),
@@ -82,7 +91,7 @@ async fn run_example(cache: DirLock<File>) -> Result<(), txfs::Error> {
     let second_txn = Txn(2);
     let third_txn = Txn(3);
 
-    let root = Dir::load(first_txn, cache).await?;
+    let root = Dir::load(cache).await?;
 
     let file_one: Id = "file-one".parse()?;
     let file_two: Id = "file-two".parse()?;
@@ -112,7 +121,7 @@ async fn run_example(cache: DirLock<File>) -> Result<(), txfs::Error> {
     assert!(root.try_get_file(second_txn, &file_one).is_err());
 
     // committing a Dir with recursive=true commits all its children
-    root.commit(first_txn, true).await;
+    root.commit(first_txn, true).await?;
 
     let subdir = root.create_dir(second_txn, subdir_name.clone()).await?;
 
@@ -120,16 +129,16 @@ async fn run_example(cache: DirLock<File>) -> Result<(), txfs::Error> {
         .create_file(second_txn, file_two.clone(), vec![2, 3, 4])
         .await?;
 
-    root.commit(second_txn, true).await;
+    root.commit(second_txn, true).await?;
 
     // deleting a directory will delete all its children, recursively
     root.delete(third_txn, subdir_name.clone()).await?;
 
     // accessing "subdir" after this can cause the filesystem to get out of sync with the cache!
-    root.commit(third_txn, true).await;
+    root.commit(third_txn, true).await?;
 
     // call "finalize" to drop all information about commits earlier than the given transaction ID
-    root.finalize(third_txn).await;
+    root.finalize(third_txn).await?;
 
     let fourth_txn = Txn(4);
 
@@ -140,7 +149,7 @@ async fn run_example(cache: DirLock<File>) -> Result<(), txfs::Error> {
         .create_file(fourth_txn, file_two, vec![3, 4, 5])
         .await?;
 
-    root.commit(fourth_txn, true).await;
+    root.commit(fourth_txn, true).await?;
 
     let fifth_txn = Txn(5);
 
